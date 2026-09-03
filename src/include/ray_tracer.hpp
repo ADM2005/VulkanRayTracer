@@ -55,7 +55,6 @@ private:
 
 	bool shouldStop = false;
 
-	uint32_t _frameNumber = 0;
 
 	void create_window();		// Creates the window, call before init_vulkan to get the right extensions for the instance.
 

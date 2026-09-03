@@ -8,6 +8,7 @@
 
 #include "include/types.hpp"
 #include "include/image_utils.hpp"
+#include "include/vk_initialisers.hpp"
 
 constexpr bool enableValidationLayers = true;
 
@@ -16,10 +17,6 @@ const uint32_t height = 800;
 
 const char* requiredExtensions[]{
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
-	VK_KHR_RAY_QUERY_EXTENSION_NAME,
-	VK_KHR_RAY_TRACING_PIPELINE_EXTENSION_NAME,
-	VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME,
-	VK_KHR_DEFERRED_HOST_OPERATIONS_EXTENSION_NAME
 };
 
 void RayTracer::init() {
@@ -50,8 +47,6 @@ void RayTracer::init_vulkan() {
 		vkDestroySurfaceKHR(_instance, _surface, nullptr);
 		});
 	select_device(vkbInstance);
-
-
 }
 
 vkb::Instance RayTracer::create_instance() {
@@ -153,7 +148,7 @@ void RayTracer::init_swapchain() {
 	VkSurfaceFormatKHR desiredSurfaceFormat{ .format = desiredFormat, .colorSpace = desiredColorSpace };
 
 	swapchainBuilder.set_desired_format(desiredSurfaceFormat)
-		.set_desired_present_mode(VK_PRESENT_MODE_MAILBOX_KHR)
+		.set_desired_present_mode(VK_PRESENT_MODE_FIFO_KHR)
 		.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_SRC_BIT)
 		.add_image_usage_flags(VK_IMAGE_USAGE_TRANSFER_DST_BIT)
 		.add_image_usage_flags(VK_IMAGE_USAGE_STORAGE_BIT);
@@ -213,7 +208,6 @@ void RayTracer::init_commands() {
 void RayTracer::run() {
 	while (!shouldStop) {
 		main_loop();
-		_frameNumber++;
 	}
 
 }
@@ -262,6 +256,7 @@ void RayTracer::main_loop() {
 void RayTracer::draw() {
 	int idx = _currentFrame % FRAMES_IN_FLIGHT;
 	vkWaitForFences(_device, 1, &_renderFinishedFences[idx], VK_TRUE, UINT64_MAX);
+	std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	vkResetFences(_device, 1, &_renderFinishedFences[idx]);
 
 
@@ -281,41 +276,42 @@ void RayTracer::draw() {
 
 	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_UNDEFINED,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
-		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		VK_ACCESS_2_NONE, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, _graphicsQueueFamily, _graphicsQueueFamily);
+		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+		VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_WRITE_BIT);
 
-	VkClearColorValue clearColor{ {0.0, 1.0, 0.0, 1.0} };
+	
+	VkClearColorValue clearColor{ {0.0, (float)(_currentFrame % 2), 0.0, 1.0} };
 
-	VkImageSubresourceRange range{};
-	range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-	range.baseArrayLayer = 0;
-	range.baseMipLevel = 0;
-	range.layerCount = 1;
-	range.levelCount = 1;
+	VkImageSubresourceRange range = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
 
 	vkCmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		&clearColor, 1, &range);
 	
 	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT,
-		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
-		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_NONE, _graphicsQueueFamily, _presentationQueueFamily);
+		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_NONE,
+		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_NONE);
 
 	vkEndCommandBuffer(cmd);
 
-	VkPipelineStageFlags stageMask = VK_PIPELINE_STAGE_2_CLEAR_BIT;
+	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(_imageAvailableSemaphores[idx], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
 
-	VkSubmitInfo submitInfo{ .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
-	submitInfo.waitSemaphoreCount = 1;
-	submitInfo.pWaitSemaphores = &_imageAvailableSemaphores[idx];
-	submitInfo.pWaitDstStageMask = &stageMask;
-	submitInfo.commandBufferCount = 1;
-	submitInfo.pCommandBuffers = &cmd;
-	submitInfo.signalSemaphoreCount = 1;
-	submitInfo.pSignalSemaphores = &_renderFinishedSemaphores[img_index];
+	VkSemaphoreSubmitInfo renderFinishedSemSubmit = vkinit::semaphoreSubmitInfo(_renderFinishedSemaphores[img_index], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+
+
+	VkCommandBufferSubmitInfo cmdSubmit{ .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+	cmdSubmit.commandBuffer = cmd;
+	cmdSubmit.deviceMask = 1;
+
+	VkSubmitInfo2 submitInfo{ .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+	submitInfo.waitSemaphoreInfoCount = 1;
+	submitInfo.signalSemaphoreInfoCount = 1;
+	submitInfo.pWaitSemaphoreInfos = &imgAvailableSemSubmit;
+	submitInfo.pSignalSemaphoreInfos = &renderFinishedSemSubmit;
+	submitInfo.commandBufferInfoCount = 1;
+	submitInfo.pCommandBufferInfos = &cmdSubmit;
 	
-	
-	vkQueueSubmit(_graphicsQueue, 1, &submitInfo, _renderFinishedFences[idx]);
+	vkQueueSubmit2(_graphicsQueue, 1, &submitInfo, _renderFinishedFences[idx]);
 
 	VkPresentInfoKHR presentInfo{.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
 	presentInfo.waitSemaphoreCount = 1;
