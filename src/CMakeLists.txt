@@ -20,6 +20,7 @@ target_link_libraries(
     stb_image
     SDL3::SDL3
     vk-bootstrap
+    imgui
 )
 
 if(WIN32)

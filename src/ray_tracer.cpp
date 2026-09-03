@@ -10,10 +10,17 @@
 #include "include/image_utils.hpp"
 #include "include/vk_initialisers.hpp"
 
+#include <imgui/imgui.h>
+#include <imgui/backends/imgui_impl_vulkan.h>
+#include <imgui/backends/imgui_impl_sdl3.h>
+
+#include <cmath>
+
+
 constexpr bool enableValidationLayers = true;
 
-const uint32_t width = 1400;
-const uint32_t height = 800;
+const uint32_t width = 1800;
+const uint32_t height = 900;
 
 const char* requiredExtensions[]{
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -26,6 +33,8 @@ void RayTracer::init() {
 	init_pipelines();
 	init_sync_structures();
 	init_commands();
+	init_descriptors();
+	init_imgui();
 }
 
 void RayTracer::create_window() {
@@ -177,7 +186,15 @@ void RayTracer::init_swapchain() {
 }
 
 void RayTracer::init_pipelines() {
-	
+	init_gfx_pipeline();
+	init_rt_pipeline();
+}
+
+void RayTracer::init_gfx_pipeline() {
+
+}
+
+void RayTracer::init_rt_pipeline() {
 }
 
 void RayTracer::init_commands() {
@@ -244,19 +261,105 @@ void RayTracer::init_sync_structures() {
 void RayTracer::main_loop() {
 	SDL_Event event;
 	while (SDL_PollEvent(&event)) {
+		ImGui_ImplSDL3_ProcessEvent(&event);
 		auto eventType = event.type;
 		if (eventType == SDL_EVENT_QUIT) {
 			shouldStop = true;
 		}
+		if (eventType == SDL_EVENT_WINDOW_MINIMIZED) {
+			minimized = true;
+		}
+		if (eventType == SDL_EVENT_WINDOW_RESTORED) {
+			minimized = false;
+		}
 	}
 
-	draw();
+	if (!shouldStop && !minimized) {
+		draw();
+	}
+	if (minimized) {
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	}
+}
+
+void RayTracer::clear_screen(VkCommandBuffer cmd, VkImage img, VkImageLayout imgLayout,
+	VkImageLayout resultLayout) {
+
+	utils::transition_image_layout(cmd, img, _swapchainFormat, imgLayout,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+		VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_WRITE_BIT);
+
+
+	VkClearColorValue clearColor{ {0.2, 0.2 + (std::cos(_currentFrame / 6.28f /5.f)) * 0.1, 0.2, 1.0}};
+
+	VkImageSubresourceRange range = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+
+	vkCmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		&clearColor, 1, &range);
+
+	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
+		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+}
+
+void RayTracer::draw_imgui(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout imgLayout,
+	VkImageLayout resultLayout) {
+	ImGui_ImplVulkan_NewFrame();
+	ImGui_ImplSDL3_NewFrame();
+	ImGui::NewFrame();
+
+	ImGui::ShowDemoWindow();
+	ImGui::Render();
+
+
+	ImDrawData* draw_data = ImGui::GetDrawData();
+
+	VkRect2D renderArea;
+	renderArea.extent = _swapchainExtent;
+	renderArea.offset = { 0,0 };
+
+	VkRenderingAttachmentInfo colorAttachment{.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+	colorAttachment.imageView = _swapchainImageViews[img_index];
+	colorAttachment.imageLayout = imgLayout;
+	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+
+	VkRenderingInfo renderingInfo{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO};
+	renderingInfo.renderArea = renderArea;
+	renderingInfo.layerCount = 1;
+	renderingInfo.viewMask = 0;
+	renderingInfo.colorAttachmentCount = 1;
+	renderingInfo.pColorAttachments = &colorAttachment;
+	
+	vkCmdBeginRendering(cmd, &renderingInfo);
+
+	ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
+
+	vkCmdEndRendering(cmd);
+
+	utils::transition_image_layout(cmd, _swapchainImages[img_index], _swapchainFormat, imgLayout,
+		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
+		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+}
+
+void RayTracer::present_swapchain_image(uint32_t idx) {
+	VkPresentInfoKHR presentInfo{ .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+	presentInfo.waitSemaphoreCount = 1;
+	presentInfo.pWaitSemaphores = &_renderFinishedSemaphores[idx];
+	presentInfo.swapchainCount = 1;
+	presentInfo.pSwapchains = &_swapchain;
+	presentInfo.pImageIndices = &idx;
+
+	vkQueuePresentKHR(_presentationQueue, &presentInfo);
 }
 
 void RayTracer::draw() {
 	int idx = _currentFrame % FRAMES_IN_FLIGHT;
 	vkWaitForFences(_device, 1, &_renderFinishedFences[idx], VK_TRUE, UINT64_MAX);
-	std::this_thread::sleep_for(std::chrono::milliseconds(2));
 	vkResetFences(_device, 1, &_renderFinishedFences[idx]);
 
 
@@ -265,33 +368,19 @@ void RayTracer::draw() {
 		_imageAvailableSemaphores[_currentFrame % FRAMES_IN_FLIGHT], VK_NULL_HANDLE,
 		&img_index);
 
+	VkImage img = _swapchainImages[img_index];
 	VkCommandBuffer cmd = _commandBuffers[idx];
+
 	vkResetCommandBuffer(cmd, 0);
+
 
 	VkCommandBufferBeginInfo beginInfo{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer(cmd, &beginInfo);
 
-	VkImage img = _swapchainImages[img_index];
-
-	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_UNDEFINED,
-		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
-		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT,
-		VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_WRITE_BIT);
-
+	clear_screen(cmd, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	
-	VkClearColorValue clearColor{ {0.0, (float)(_currentFrame % 2), 0.0, 1.0} };
-
-	VkImageSubresourceRange range = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
-
-	vkCmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		&clearColor, 1, &range);
-	
-	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT,
-		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_NONE,
-		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_NONE);
-
+	draw_imgui(cmd, img_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 	vkEndCommandBuffer(cmd);
 
 	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(_imageAvailableSemaphores[idx], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
@@ -311,17 +400,10 @@ void RayTracer::draw() {
 	submitInfo.commandBufferInfoCount = 1;
 	submitInfo.pCommandBufferInfos = &cmdSubmit;
 	
+
 	vkQueueSubmit2(_graphicsQueue, 1, &submitInfo, _renderFinishedFences[idx]);
 
-	VkPresentInfoKHR presentInfo{.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR};
-	presentInfo.waitSemaphoreCount = 1;
-	presentInfo.pWaitSemaphores = &_renderFinishedSemaphores[img_index];
-	presentInfo.swapchainCount = 1;
-	presentInfo.pSwapchains = &_swapchain;
-	presentInfo.pImageIndices = &img_index;
-	
-	vkQueuePresentKHR(_presentationQueue, &presentInfo);
-
+	present_swapchain_image(img_index);
 	_currentFrame++;
 }
 
@@ -329,4 +411,63 @@ void RayTracer::cleanup() {
 	vkDeviceWaitIdle(_device);
 	_deletionQueue.flush();
 	SDL_DestroyWindow(_pWindow);
+}
+
+void RayTracer::init_descriptors() {
+	VkDescriptorPoolSize descriptorPoolSizes[]
+	{
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE},
+		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE}
+	};
+
+	VkDescriptorPoolCreateInfo poolCreateInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+	poolCreateInfo.maxSets = 0;
+	poolCreateInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+	for (auto poolSize : descriptorPoolSizes) {
+		poolCreateInfo.maxSets += poolSize.descriptorCount;
+	}
+	poolCreateInfo.poolSizeCount = 2;
+	poolCreateInfo.pPoolSizes = descriptorPoolSizes;
+
+	if (vkCreateDescriptorPool(_device, &poolCreateInfo, nullptr, &_descriptorPool) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create descriptor pool!");
+	}
+
+	_deletionQueue.push([&]() {
+		vkDestroyDescriptorPool(_device, _descriptorPool, nullptr);
+		});
+}
+
+void RayTracer::init_imgui() {
+	ImGui::CreateContext();
+
+	VkPipelineRenderingCreateInfo pipelineRenderingInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
+	pipelineRenderingInfo.colorAttachmentCount = 1;
+	pipelineRenderingInfo.pColorAttachmentFormats = &_swapchainFormat;
+	pipelineRenderingInfo.viewMask = 0;	// No multiview
+
+
+	ImGui_ImplSDL3_InitForVulkan(_pWindow);
+	ImGui_ImplVulkan_InitInfo init_info = {};
+	init_info.ApiVersion = VK_API_VERSION_1_3;              
+	init_info.Instance = _instance;
+	init_info.PhysicalDevice = _physical_device;
+	init_info.Device = _device;
+	init_info.QueueFamily = _graphicsQueueFamily;
+	init_info.Queue = _graphicsQueue;
+	init_info.PipelineCache = VK_NULL_HANDLE;
+	init_info.DescriptorPool = _descriptorPool;
+	init_info.MinImageCount = 3;
+	init_info.ImageCount = 3;
+	init_info.Allocator = nullptr;
+
+	init_info.UseDynamicRendering = true;
+	init_info.PipelineInfoMain.PipelineRenderingCreateInfo = pipelineRenderingInfo;
+	init_info.PipelineInfoMain.MSAASamples = VK_SAMPLE_COUNT_1_BIT;
+
+	ImGui_ImplVulkan_Init(&init_info);
+
+	_deletionQueue.push([&]() {
+		ImGui_ImplVulkan_Shutdown();
+		});
 }
