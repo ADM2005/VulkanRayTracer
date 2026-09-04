@@ -8,10 +8,18 @@
 
 #include "include/types.hpp"
 
+#include <vk_mem_alloc.h>
+
 constexpr int FRAMES_IN_FLIGHT = 2;
 
 class RayTracer {
 public: 
+
+	VmaAllocator allocator;
+
+	DeletionQueue deletionQueue;
+
+
 	void init();
 
 	void run();
@@ -19,12 +27,12 @@ public:
 	void cleanup();
 
 private:
+
 	uint32_t _currentFrame{ 0 };
 
 	VkCommandPool _commandPool;
 	std::vector<VkCommandBuffer> _commandBuffers;
 
-	DeletionQueue _deletionQueue;
 
 	SDL_Window* _pWindow;
 	VkSurfaceKHR _surface;
@@ -75,6 +83,7 @@ private:
 
 	void init_swapchain();
 
+
 	void init_pipelines();
 
 	void init_gfx_pipeline();
@@ -83,6 +92,8 @@ private:
 	void init_commands();
 
 	void init_descriptors();
+
+	void create_descriptor_pool();
 
 	void init_imgui();
 
@@ -93,6 +104,8 @@ private:
 	void clear_screen(VkCommandBuffer cmd, VkImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 	void draw_imgui(VkCommandBuffer cmd, uint32_t idx, VkImageLayout imgLayout, VkImageLayout resultLayout);
+
+	void draw_gfx(VkCommandBuffer cmd, uint32_t idx, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 	void present_swapchain_image(uint32_t idx);
 };

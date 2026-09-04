@@ -9,6 +9,7 @@
 #include "include/types.hpp"
 #include "include/image_utils.hpp"
 #include "include/vk_initialisers.hpp"
+#include "include/loaders.hpp"
 
 #include <imgui/imgui.h>
 #include <imgui/backends/imgui_impl_vulkan.h>
@@ -52,7 +53,7 @@ void RayTracer::init_vulkan() {
 		throw std::runtime_error("failed to create surface!");
 	}
 
-	_deletionQueue.push([&]() {
+	deletionQueue.push([&]() {
 		vkDestroySurfaceKHR(_instance, _surface, nullptr);
 		});
 	select_device(vkbInstance);
@@ -80,7 +81,7 @@ vkb::Instance RayTracer::create_instance() {
 		throw std::runtime_error("Failed to create Vulkan Instance! Reason: " + instanceRet.error().message());
 	}
 
-	_deletionQueue.push([=]() {
+	deletionQueue.push([=]() {
 		vkb::destroy_instance(instanceRet.value());
 	});
 	return instanceRet.value();
@@ -143,7 +144,7 @@ void RayTracer::select_device(vkb::Instance& instance) {
 
 	std::cout << "Device: " << _vkb_device.physical_device.name << '\n';
 	
-	_deletionQueue.push([=]() {
+	deletionQueue.push([=]() {
 		vkb::destroy_device(_vkb_device);
 	});
 }
@@ -168,7 +169,6 @@ void RayTracer::init_swapchain() {
 	}
 
 	vkb::Swapchain vkb_swapchain = swapchain_ret.value();
-	
 
 	_swapchainImages = vkb_swapchain.get_images().value();
 	_swapchainImageViews = vkb_swapchain.get_image_views().value();
@@ -177,7 +177,7 @@ void RayTracer::init_swapchain() {
 	_swapchain = vkb_swapchain.swapchain;
 	_swapchainFormat = vkb_swapchain.image_format;
 
-	_deletionQueue.push([=]() {
+	deletionQueue.push([=]() {
 		for (size_t i = 0; i < _swapchainImages.size(); i++) {
 			vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
 		}
@@ -191,7 +191,107 @@ void RayTracer::init_pipelines() {
 }
 
 void RayTracer::init_gfx_pipeline() {
+	VkPipelineLayoutCreateInfo layoutCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+	layoutCreateInfo.setLayoutCount = 0;
+	layoutCreateInfo.pushConstantRangeCount = 0;
 
+	
+	if (vkCreatePipelineLayout(_device, &layoutCreateInfo, nullptr, &_gfxPipelineLayout) != VK_SUCCESS)
+		throw std::runtime_error("failed to create pipeline layout!");
+
+	VkShaderModule vertModule = loaders::load_shader("../../shaders/hardcoded_triangle/bin/vert.vert.spv", _device);
+	VkShaderModule fragModule = loaders::load_shader("../../shaders/hardcoded_triangle/bin/frag.frag.spv", _device);
+
+	VkPipelineShaderStageCreateInfo vertInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};	
+	vertInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
+	vertInfo.module = vertModule;
+	vertInfo.pName = "main";
+
+	VkPipelineShaderStageCreateInfo fragInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	fragInfo.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+	fragInfo.module = fragModule;
+	fragInfo.pName = "main";
+
+	VkPipelineShaderStageCreateInfo stages[2] { vertInfo, fragInfo };
+	
+	VkPipelineVertexInputStateCreateInfo vertInputState{.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+	vertInputState.vertexAttributeDescriptionCount = 0;
+	vertInputState.vertexBindingDescriptionCount = 0;		// Will be using vertex pulling instead of dedicated VB
+
+	VkPipelineInputAssemblyStateCreateInfo inputAssembly{ .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+	inputAssembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+	VkPipelineViewportStateCreateInfo viewportState{.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+	viewportState.scissorCount = 1;
+	viewportState.viewportCount = 1;
+
+	VkPipelineRasterizationStateCreateInfo rasterizer{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
+	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterizer.lineWidth = 1.0f;
+
+	VkPipelineMultisampleStateCreateInfo multisampleState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+	multisampleState.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+	multisampleState.sampleShadingEnable = VK_FALSE;
+
+
+	VkPipelineDepthStencilStateCreateInfo depthStencilState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+	depthStencilState.depthTestEnable = VK_FALSE;
+	depthStencilState.depthWriteEnable = VK_FALSE;
+	depthStencilState.depthCompareOp = VK_COMPARE_OP_NEVER;
+	depthStencilState.depthBoundsTestEnable = VK_FALSE;
+	depthStencilState.stencilTestEnable = VK_FALSE;
+	depthStencilState.minDepthBounds = 0.0;
+	depthStencilState.maxDepthBounds = 1.0;
+
+	VkPipelineColorBlendAttachmentState attachmentState{};
+	attachmentState.blendEnable = VK_FALSE;
+	attachmentState.colorWriteMask = VK_COLOR_COMPONENT_FLAG_BITS_MAX_ENUM;
+
+	VkPipelineColorBlendStateCreateInfo colorBlendState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+	colorBlendState.logicOpEnable = VK_FALSE;
+	colorBlendState.logicOp = VK_LOGIC_OP_CLEAR;	// Unused
+	colorBlendState.attachmentCount = 1;
+	colorBlendState.pAttachments = &attachmentState;
+
+	VkDynamicState dynamicStates[2] = { VK_DYNAMIC_STATE_VIEWPORT	, VK_DYNAMIC_STATE_SCISSOR };
+
+
+	VkPipelineDynamicStateCreateInfo dynamicState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+	dynamicState.dynamicStateCount = 2;
+	dynamicState.pDynamicStates = dynamicStates;
+
+	VkPipelineRenderingCreateInfo pipelineRenderingInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+	pipelineRenderingInfo.colorAttachmentCount = 1;
+	pipelineRenderingInfo.pColorAttachmentFormats = &_swapchainFormat;
+	
+	VkGraphicsPipelineCreateInfo gfxPipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+	gfxPipeline.pNext = &pipelineRenderingInfo;
+	gfxPipeline.stageCount = 2;
+	gfxPipeline.pStages = stages;
+
+	gfxPipeline.pVertexInputState = &vertInputState;
+	gfxPipeline.pInputAssemblyState = &inputAssembly;
+	gfxPipeline.pViewportState = &viewportState;
+	gfxPipeline.pRasterizationState = &rasterizer;
+	gfxPipeline.pMultisampleState = &multisampleState;
+	gfxPipeline.pDepthStencilState = &depthStencilState;
+	gfxPipeline.pColorBlendState = &colorBlendState;
+	gfxPipeline.pDynamicState = &dynamicState;
+	gfxPipeline.layout = _gfxPipelineLayout;
+
+	if (vkCreateGraphicsPipelines(_device, VK_NULL_HANDLE, 1, &gfxPipeline, nullptr, &_gfxPipeline)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create graphics pipeline!");
+	}
+
+	deletionQueue.push([=]() {
+		vkDestroyShaderModule(_device, vertModule, nullptr);
+		vkDestroyShaderModule(_device, fragModule, nullptr);
+		vkDestroyPipelineLayout(_device, _gfxPipelineLayout, nullptr);
+		vkDestroyPipeline(_device, _gfxPipeline, nullptr);
+		});
 }
 
 void RayTracer::init_rt_pipeline() {
@@ -217,7 +317,7 @@ void RayTracer::init_commands() {
 		throw std::runtime_error("failed to allocate command buffers!");
 	}
 
-	_deletionQueue.push([=]() {
+	deletionQueue.push([=]() {
 		vkDestroyCommandPool(_device, _commandPool, nullptr);
 		});
 }
@@ -247,7 +347,7 @@ void RayTracer::init_sync_structures() {
 		vkCreateSemaphore(_device, &semCreateInfo, nullptr, &_renderFinishedSemaphores[i]);
 	}
 
-	_deletionQueue.push([&]() {
+	deletionQueue.push([&]() {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
 			vkDestroyFence(_device, _renderFinishedFences[i], nullptr);
 			vkDestroySemaphore(_device, _imageAvailableSemaphores[i], nullptr);
@@ -380,7 +480,11 @@ void RayTracer::draw() {
 
 	clear_screen(cmd, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	
+	draw_gfx(cmd, img_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
 	draw_imgui(cmd, img_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+
+
 	vkEndCommandBuffer(cmd);
 
 	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(_imageAvailableSemaphores[idx], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
@@ -407,17 +511,66 @@ void RayTracer::draw() {
 	_currentFrame++;
 }
 
+void RayTracer::draw_gfx(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout imgLayout, VkImageLayout resultLayout) {
+	VkRect2D area{ .offset={0,0}, .extent = _swapchainExtent};
+
+	VkRenderingAttachmentInfo attachInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+	attachInfo.imageView = _swapchainImageViews[img_index];
+	attachInfo.imageLayout = imgLayout;
+	attachInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	attachInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+	VkRenderingInfo rendInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO };
+	rendInfo.renderArea = area;
+	rendInfo.layerCount = 1;
+	rendInfo.colorAttachmentCount = 1;
+	rendInfo.pColorAttachments = &attachInfo;
+
+	vkCmdBeginRendering(cmd, &rendInfo);
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipeline);
+	VkViewport viewport{};
+	viewport.x = 0;
+	viewport.y = 0;
+	viewport.width = _swapchainExtent.width;
+	viewport.height = _swapchainExtent.height;
+	viewport.minDepth = 0.0f;
+	viewport.maxDepth = 1.0f;
+
+	VkRect2D scissor{};
+	scissor.extent = _swapchainExtent;
+	scissor.offset = { 0,0 };
+
+	vkCmdSetViewport(cmd, 0, 1, &viewport);
+	vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+	vkCmdDraw(cmd, 3, 1, 0, 0);
+
+	vkCmdEndRendering(cmd);
+
+	utils::transition_image_layout(cmd, _swapchainImages[img_index], _swapchainFormat, imgLayout,
+		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
+		VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+}
+
 void RayTracer::cleanup() {
 	vkDeviceWaitIdle(_device);
-	_deletionQueue.flush();
+	deletionQueue.flush();
 	SDL_DestroyWindow(_pWindow);
 }
 
 void RayTracer::init_descriptors() {
+	create_descriptor_pool();
+}
+
+void RayTracer::create_descriptor_pool() {
 	VkDescriptorPoolSize descriptorPoolSizes[]
 	{
 		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE},
-		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE}
+		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE},
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
 	};
 
 	VkDescriptorPoolCreateInfo poolCreateInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -433,7 +586,7 @@ void RayTracer::init_descriptors() {
 		throw std::runtime_error("failed to create descriptor pool!");
 	}
 
-	_deletionQueue.push([&]() {
+	deletionQueue.push([&]() {
 		vkDestroyDescriptorPool(_device, _descriptorPool, nullptr);
 		});
 }
@@ -467,7 +620,7 @@ void RayTracer::init_imgui() {
 
 	ImGui_ImplVulkan_Init(&init_info);
 
-	_deletionQueue.push([&]() {
+	deletionQueue.push([&]() {
 		ImGui_ImplVulkan_Shutdown();
 		});
 }

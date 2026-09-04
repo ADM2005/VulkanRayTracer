@@ -1,10 +1,16 @@
 find_package(Vulkan REQUIRED)
 
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 add_subdirectory(vma)
 add_subdirectory(vk-bootstrap)
 add_subdirectory(SDL)
 add_subdirectory(glm)
 add_subdirectory(fastgltf)
+
+
 
 add_library(imgui STATIC)
 target_include_directories(imgui 

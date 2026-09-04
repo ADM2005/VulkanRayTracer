@@ -21,6 +21,7 @@ target_link_libraries(
     SDL3::SDL3
     vk-bootstrap
     imgui
+    VulkanMemoryAllocator
 )
 
 if(WIN32)
