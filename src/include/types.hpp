@@ -4,7 +4,13 @@
 #include <functional>
 
 #include <vk_mem_alloc.h>
+
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
+struct GFXPushConstants {
+	VkDeviceAddress vertAddress;
+};
 
 struct DeletionQueue {
 	std::vector<std::function<void()>> _queue;
@@ -36,6 +42,15 @@ struct Vertex{
 	glm::vec3 normal;
 	float uv_y;
 	glm::vec4 color;
+};
+
+struct ViewUBO {
+	glm::mat4x4 view;
+	glm::mat4x4 proj;
+};
+
+struct MeshUBO {
+	glm::mat4x4 model;
 };
 
 struct MeshPrimitive {

@@ -25,7 +25,10 @@ file(GLOB_RECURSE GLSL_SOURCE_FILES CONFIGURE_DEPENDS
 foreach(GLSL ${GLSL_SOURCE_FILES})
   message(STATUS "BUILDING SHADER")
   get_filename_component(FILE_NAME ${GLSL} NAME)
-  set(SPIRV "${PROJECT_SOURCE_DIR}/shaders/${FILE_NAME}.spv")
+  get_filename_component(FILE_DIR ${GLSL} DIRECTORY)
+
+  message(STATUS ${FILE_DIR})
+  set(SPIRV "${FILE_DIR}/bin/${FILE_NAME}.spv")
   message(STATUS ${GLSL})
   add_custom_command(
     OUTPUT ${SPIRV}

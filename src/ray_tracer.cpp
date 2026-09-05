@@ -1,3 +1,6 @@
+#define VMA_IMPLEMENTATION
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+
 #include "include/ray_tracer.hpp"
 #include <iostream>
 #include <thread>
@@ -16,6 +19,7 @@
 #include <imgui/backends/imgui_impl_sdl3.h>
 
 #include <cmath>
+#include <iterator>
 
 
 constexpr bool enableValidationLayers = true;
@@ -30,12 +34,15 @@ const char* requiredExtensions[]{
 void RayTracer::init() {
 	create_window();
 	init_vulkan();
+	init_vma();
 	init_swapchain();
+	create_uniform_buffers();
+	init_descriptors();
 	init_pipelines();
 	init_sync_structures();
 	init_commands();
-	init_descriptors();
 	init_imgui();
+	load_scene();
 }
 
 void RayTracer::create_window() {
@@ -191,16 +198,26 @@ void RayTracer::init_pipelines() {
 }
 
 void RayTracer::init_gfx_pipeline() {
+	VkPushConstantRange pcRange{};
+	pcRange.stageFlags = VK_SHADER_STAGE_ALL;
+	pcRange.offset = 0;
+	pcRange.size = sizeof(GFXPushConstants);
+
+	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout, _perMeshGFXLayout };
+
 	VkPipelineLayoutCreateInfo layoutCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 	layoutCreateInfo.setLayoutCount = 0;
-	layoutCreateInfo.pushConstantRangeCount = 0;
-
+	layoutCreateInfo.pushConstantRangeCount = 1;
+	layoutCreateInfo.pPushConstantRanges = &pcRange;
+	layoutCreateInfo.setLayoutCount = 2;
+	layoutCreateInfo.pSetLayouts = layouts;
+	
 	
 	if (vkCreatePipelineLayout(_device, &layoutCreateInfo, nullptr, &_gfxPipelineLayout) != VK_SUCCESS)
 		throw std::runtime_error("failed to create pipeline layout!");
 
-	VkShaderModule vertModule = loaders::load_shader("../../shaders/hardcoded_triangle/bin/vert.vert.spv", _device);
-	VkShaderModule fragModule = loaders::load_shader("../../shaders/hardcoded_triangle/bin/frag.frag.spv", _device);
+	VkShaderModule vertModule = loaders::load_shader("../../shaders/mesh/bin/vert.vert.spv", _device);
+	VkShaderModule fragModule = loaders::load_shader("../../shaders/mesh/bin/frag.frag.spv", _device);
 
 	VkPipelineShaderStageCreateInfo vertInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};	
 	vertInfo.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -297,6 +314,54 @@ void RayTracer::init_gfx_pipeline() {
 void RayTracer::init_rt_pipeline() {
 }
 
+void RayTracer::init_imm_commands() {
+	VkCommandPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+	poolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+	poolCreateInfo.queueFamilyIndex = _graphicsQueueFamily;
+
+	vkCreateCommandPool(_device, &poolCreateInfo, nullptr, &_immCommandPool);
+
+	VkCommandBufferAllocateInfo cmdAllocInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO };
+	cmdAllocInfo.commandPool = _immCommandPool;
+	cmdAllocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+	cmdAllocInfo.commandBufferCount = 1;
+
+	vkAllocateCommandBuffers(_device, &cmdAllocInfo, &_immCommandBuffer);
+
+	VkFenceCreateInfo fenceCreateInfo{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+	vkCreateFence(_device, &fenceCreateInfo, nullptr, &_immFence);
+
+	deletionQueue.push([=]() {
+		vkDestroyCommandPool(_device, _immCommandPool, nullptr);
+
+		});
+}
+
+void RayTracer::immediate_submit(std::function<void(VkCommandBuffer cmd)> func) {
+	vkResetFences(_device, 1, &_immFence);
+	vkResetCommandBuffer(_immCommandBuffer, 0);
+
+
+	VkCommandBufferBeginInfo cmdBeginInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+	cmdBeginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+
+	vkBeginCommandBuffer(_immCommandBuffer, &cmdBeginInfo);
+	func(_immCommandBuffer);
+	vkEndCommandBuffer(_immCommandBuffer);
+
+	VkCommandBufferSubmitInfo cmdSubmitInfo{ VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO };
+	cmdSubmitInfo.commandBuffer = _immCommandBuffer;
+
+	VkSubmitInfo2 submitInfo{ VK_STRUCTURE_TYPE_SUBMIT_INFO_2 };
+	submitInfo.commandBufferInfoCount = 1;
+	submitInfo.pCommandBufferInfos = &cmdSubmitInfo;
+	
+	vkQueueSubmit2(_graphicsQueue, 1, &submitInfo, _immFence);
+	vkWaitForFences(_device, 1, &_immFence, VK_TRUE, UINT64_MAX);
+}
+
 void RayTracer::init_commands() {
 	VkCommandPoolCreateInfo cmdPoolCreateInfo{.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
 	cmdPoolCreateInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -317,9 +382,13 @@ void RayTracer::init_commands() {
 		throw std::runtime_error("failed to allocate command buffers!");
 	}
 
+
 	deletionQueue.push([=]() {
 		vkDestroyCommandPool(_device, _commandPool, nullptr);
+		vkDestroyFence(_device, _immFence, nullptr);
 		});
+
+	init_imm_commands();;
 }
 
 void RayTracer::run() {
@@ -410,7 +479,6 @@ void RayTracer::draw_imgui(VkCommandBuffer cmd, uint32_t img_index, VkImageLayou
 	ImGui_ImplSDL3_NewFrame();
 	ImGui::NewFrame();
 
-	ImGui::ShowDemoWindow();
 	ImGui::Render();
 
 
@@ -526,7 +594,28 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout 
 	rendInfo.colorAttachmentCount = 1;
 	rendInfo.pColorAttachments = &attachInfo;
 
+	ViewUBO view{};
+	view.view = glm::translate(glm::mat4{ 1 }, { 0,0,-5 });
+	view.proj = glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f);
+	view.proj[1][1] *= -1; // account for vulkan flipped y-direction
+
+	MeshUBO mesh{};
+	mesh.model = glm::mat4{ 1 };
+
+	memcpy(viewUBO.allocInfo.pMappedData, &view, sizeof(view));
+	memcpy(meshUBO.allocInfo.pMappedData, &mesh, sizeof(mesh));
+	
 	vkCmdBeginRendering(cmd, &rendInfo);
+
+	VkDescriptorSet sets[] { _perFrameGFXDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT], _perMeshGFXDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT]};
+
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipelineLayout,
+		0, 2, sets, 0, nullptr);
+
+	GFXPushConstants pc{ .vertAddress = vertAddress };
+	
+	vkCmdBindIndexBuffer(cmd, selectedMesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+	vkCmdPushConstants(cmd, _gfxPipelineLayout, VK_SHADER_STAGE_ALL, 0, 8, &pc);
 
 	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipeline);
 	VkViewport viewport{};
@@ -544,7 +633,14 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout 
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-	vkCmdDraw(cmd, 3, 1, 0, 0);
+	
+
+	for (auto primitive : selectedMesh.primitives) {
+		auto firstIndex = primitive.firstIndex;
+		auto count = primitive.count;
+		auto offset = primitive.vertexOffset;
+		vkCmdDrawIndexed(cmd, count, 1, firstIndex, offset, 0);
+	}
 
 	vkCmdEndRendering(cmd);
 
@@ -562,6 +658,106 @@ void RayTracer::cleanup() {
 
 void RayTracer::init_descriptors() {
 	create_descriptor_pool();
+	create_descriptor_layouts();
+}
+
+void RayTracer::create_descriptor_layouts() {
+	create_gfx_descriptors();
+}
+
+void RayTracer::create_gfx_descriptors() {
+	VkDescriptorSetLayoutBinding perFrameUniformBinding{}; // View and Projection Matrices
+	perFrameUniformBinding.binding = 0;
+	perFrameUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	perFrameUniformBinding.descriptorCount = 1;
+	perFrameUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	VkDescriptorSetLayoutCreateInfo perFrameDescInfo {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+	perFrameDescInfo.bindingCount = 1;
+	perFrameDescInfo.pBindings = &perFrameUniformBinding;
+
+	if (vkCreateDescriptorSetLayout(_device, &perFrameDescInfo, nullptr, &_perFrameGFXLayout) != VK_SUCCESS)
+		throw std::runtime_error("failed to create descriptor set layout for per-frame graphics data");
+
+	VkDescriptorSetLayoutBinding perMeshUniformBinding{}; // Just the model matrix for now, later on could be material data
+	perMeshUniformBinding.binding = 0;
+	perMeshUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	perMeshUniformBinding.descriptorCount = 1;
+	perMeshUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+
+	VkDescriptorSetLayoutCreateInfo perMeshDescInfo { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+	perMeshDescInfo.bindingCount = 1;
+	perMeshDescInfo.pBindings = &perMeshUniformBinding;
+
+	if (vkCreateDescriptorSetLayout(_device, &perMeshDescInfo, nullptr, &_perMeshGFXLayout) != VK_SUCCESS)
+		throw std::runtime_error("failed to create descriptor set layout for per-frame graphics data");
+	
+
+
+	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout, _perFrameGFXLayout, _perMeshGFXLayout, _perMeshGFXLayout};
+
+	VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+	allocInfo.descriptorPool = _descriptorPool;
+	allocInfo.descriptorSetCount = 4;
+	allocInfo.pSetLayouts = layouts;
+
+	_perFrameGFXDescriptorSets.resize(FRAMES_IN_FLIGHT);
+	_perMeshGFXDescriptorSets.resize(FRAMES_IN_FLIGHT);
+
+	VkDescriptorSet sets[]{ _perFrameGFXDescriptorSets[0], _perFrameGFXDescriptorSets[1], _perMeshGFXDescriptorSets[0], _perMeshGFXDescriptorSets[1]};
+
+	if (vkAllocateDescriptorSets(_device, &allocInfo, sets) != VK_SUCCESS)
+		throw std::runtime_error("failed to allocate descriptor sets!");
+
+	_perFrameGFXDescriptorSets[0] = sets[0];
+	_perFrameGFXDescriptorSets[1] = sets[1];
+
+	_perMeshGFXDescriptorSets[0] = sets[2];
+	_perMeshGFXDescriptorSets[1] = sets[3];
+
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		VkDescriptorBufferInfo vBufferInfo{};
+		vBufferInfo.buffer = viewUBO.buffer;
+		vBufferInfo.offset = 0;
+		vBufferInfo.range = sizeof(ViewUBO);
+
+		VkDescriptorBufferInfo mBufferInfo{};
+		mBufferInfo.buffer = meshUBO.buffer;
+		mBufferInfo.offset = 0;
+		mBufferInfo.range = sizeof(MeshUBO);
+
+		VkWriteDescriptorSet viewWrite{
+			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+		};
+		viewWrite.dstSet = _perFrameGFXDescriptorSets[i];
+		viewWrite.dstBinding = 0;
+		viewWrite.descriptorCount = 1;
+		viewWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		viewWrite.pBufferInfo = &vBufferInfo;
+
+		VkWriteDescriptorSet meshWrite{
+			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
+		};
+		meshWrite.dstSet = _perMeshGFXDescriptorSets[i];
+		meshWrite.dstBinding = 0;
+		meshWrite.descriptorCount = 1;
+		meshWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		meshWrite.pBufferInfo = &mBufferInfo;
+
+		VkWriteDescriptorSet writes[] = {
+			viewWrite,
+			meshWrite
+		};
+
+		vkUpdateDescriptorSets(_device, 2, writes, 0, nullptr);
+	}
+
+	deletionQueue.push([&]() {
+		vkDestroyDescriptorSetLayout(_device, _perFrameGFXLayout, nullptr);
+		vkDestroyDescriptorSetLayout(_device, _perMeshGFXLayout, nullptr);
+		});
+
+
 }
 
 void RayTracer::create_descriptor_pool() {
@@ -570,7 +766,7 @@ void RayTracer::create_descriptor_pool() {
 		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE},
 		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE},
 		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
-		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}
+		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4}
 	};
 
 	VkDescriptorPoolCreateInfo poolCreateInfo{.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
@@ -579,7 +775,7 @@ void RayTracer::create_descriptor_pool() {
 	for (auto poolSize : descriptorPoolSizes) {
 		poolCreateInfo.maxSets += poolSize.descriptorCount;
 	}
-	poolCreateInfo.poolSizeCount = 2;
+	poolCreateInfo.poolSizeCount = std::size(descriptorPoolSizes);
 	poolCreateInfo.pPoolSizes = descriptorPoolSizes;
 
 	if (vkCreateDescriptorPool(_device, &poolCreateInfo, nullptr, &_descriptorPool) != VK_SUCCESS) {
@@ -622,5 +818,82 @@ void RayTracer::init_imgui() {
 
 	deletionQueue.push([&]() {
 		ImGui_ImplVulkan_Shutdown();
+		});
+}
+
+void RayTracer::init_vma() {
+	VmaAllocatorCreateInfo createInfo{};
+	createInfo.flags = VMA_ALLOCATOR_CREATE_BUFFER_DEVICE_ADDRESS_BIT;
+	createInfo.physicalDevice = _physical_device;
+	createInfo.device = _device;
+	createInfo.instance = _instance;
+	createInfo.vulkanApiVersion = VK_MAKE_VERSION(1, 3, 0);
+
+	vmaCreateAllocator(&createInfo, &allocator);
+
+	deletionQueue.push([&]() {
+		vmaDestroyAllocator(allocator);
+		});
+}
+
+void RayTracer::load_scene() {
+	load_meshes();
+}
+
+void RayTracer::load_meshes() {
+	auto load_ret = loaders::load_gltf_meshes("../../assets/Suzanne/Suzanne.gltf", this);
+	if (!load_ret.has_value()) {
+		throw std::runtime_error("failed to load meshes!");
+	}
+
+	_meshData = load_ret.value();
+
+	selectedMesh = _meshData[0];
+	VkBufferDeviceAddressInfo addrInfo{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+	addrInfo.buffer = selectedMesh.vertexBuffer.buffer;
+
+	vertAddress = vkGetBufferDeviceAddress(_device, &addrInfo);
+}
+
+void RayTracer::create_uniform_buffers(){
+	// View Buffer
+	VkBufferCreateInfo viewBufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	viewBufferInfo.size = sizeof(ViewUBO);
+	viewBufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	viewBufferInfo.queueFamilyIndexCount = 1;
+	viewBufferInfo.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+
+	VmaAllocationCreateInfo viewBufferAllocInfo{};
+	viewBufferAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	viewBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	viewBufferAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	if (vmaCreateBuffer(allocator, &viewBufferInfo, &viewBufferAllocInfo, &viewUBO.buffer, &viewUBO.alloc, &viewUBO.allocInfo)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create view UBO!");
+	}
+
+
+	// Mesh Buffer
+	VkBufferCreateInfo meshBufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	meshBufferInfo.size = sizeof(MeshUBO);
+	meshBufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	meshBufferInfo.queueFamilyIndexCount = 1;
+	meshBufferInfo.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+	VmaAllocationCreateInfo meshBufferAllocInfo{};
+	meshBufferAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	meshBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+
+	if (vmaCreateBuffer(allocator, &meshBufferInfo, &meshBufferAllocInfo, &meshUBO.buffer, &meshUBO.alloc, &meshUBO.allocInfo)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create mesh UBO!");
+	}
+
+	deletionQueue.push([&]() {
+		vmaDestroyBuffer(allocator, viewUBO.buffer, viewUBO.alloc);
+		vmaDestroyBuffer(allocator, meshUBO.buffer, meshUBO.alloc);
+
 		});
 }

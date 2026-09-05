@@ -26,6 +26,8 @@ public:
 
 	void cleanup();
 
+	void immediate_submit(std::function<void(VkCommandBuffer cmd)> func);
+
 private:
 
 	uint32_t _currentFrame{ 0 };
@@ -33,6 +35,17 @@ private:
 	VkCommandPool _commandPool;
 	std::vector<VkCommandBuffer> _commandBuffers;
 
+	VkCommandPool _immCommandPool;
+	VkCommandBuffer _immCommandBuffer;
+
+	VkFence _immFence;
+
+	std::vector<AllocatedMesh> _meshData;
+	AllocatedMesh selectedMesh;
+	VkDeviceAddress vertAddress;
+
+	AllocatedBuffer viewUBO{};		// Projection and View
+	AllocatedBuffer meshUBO{};		// Model matrix (potentially textures/samplers later on)
 
 	SDL_Window* _pWindow;
 	VkSurfaceKHR _surface;
@@ -64,6 +77,12 @@ private:
 	VkPipelineLayout _gfxPipelineLayout;
 	VkPipeline _gfxPipeline;
 
+	VkDescriptorSetLayout _perFrameGFXLayout;
+	std::vector<VkDescriptorSet> _perFrameGFXDescriptorSets;
+
+	VkDescriptorSetLayout _perMeshGFXLayout;
+	std::vector<VkDescriptorSet> _perMeshGFXDescriptorSets;
+
 	VkPipelineLayout _computeRTPipelineLayout;
 	VkPipeline _computeRTPipeline;
 
@@ -81,8 +100,9 @@ private:
 
 	void main_loop();
 
-	void init_swapchain();
+	void init_vma();
 
+	void init_swapchain();
 
 	void init_pipelines();
 
@@ -90,14 +110,24 @@ private:
 	void init_rt_pipeline();
 
 	void init_commands();
+	void init_imm_commands();
 
 	void init_descriptors();
 
 	void create_descriptor_pool();
 
+	void create_descriptor_layouts();
+	void create_gfx_descriptors();
+
+	void create_uniform_buffers();
+
 	void init_imgui();
 
 	void init_sync_structures();
+
+	void load_scene();
+
+	void load_meshes();
 
 	void draw();
 

@@ -12,5 +12,5 @@ namespace loaders {
 	// Loads GLTF meshes into a list of AllocatedMesh
 	// Each mesh gets a unique AllocatedMesh struct, which lists out the primitives inside.
 
-	std::optional<std::vector<AllocatedMesh>> load_gltf_meshes(const char* filepath, RayTracer* rayTracer);
+	std::optional<std::vector<AllocatedMesh>> load_gltf_meshes(const char* filepath, RayTracer* rt);
 }
