@@ -24,8 +24,8 @@
 
 constexpr bool enableValidationLayers = true;
 
-const uint32_t width = 1800;
-const uint32_t height = 900;
+const uint32_t width = 1920;
+const uint32_t height = 1080;
 
 const char* requiredExtensions[]{
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -36,6 +36,7 @@ void RayTracer::init() {
 	init_vulkan();
 	init_vma();
 	init_swapchain();
+	init_draw_images();
 	create_uniform_buffers();
 	init_descriptors();
 	init_pipelines();
@@ -189,6 +190,56 @@ void RayTracer::init_swapchain() {
 			vkDestroyImageView(_device, _swapchainImageViews[i], nullptr);
 		}
 		vkDestroySwapchainKHR(_device, _swapchain, nullptr);
+	});
+}
+
+void RayTracer::init_draw_images() {
+	VkImageCreateInfo imgCreate{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+	imgCreate.imageType = VK_IMAGE_TYPE_2D;
+	imgCreate.format = VK_FORMAT_R16G16B16A16_UNORM;
+	imgCreate.extent = { _swapchainExtent.width, _swapchainExtent.height, 1 };
+	imgCreate.mipLevels = 1;
+	imgCreate.arrayLayers = 1;
+	imgCreate.samples = VK_SAMPLE_COUNT_1_BIT;
+	imgCreate.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imgCreate.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+	imgCreate.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // for now as only using one queue
+	imgCreate.queueFamilyIndexCount = 1;
+	imgCreate.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+	VmaAllocationCreateInfo allocCreate{};
+	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	_drawImages.resize(FRAMES_IN_FLIGHT);
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		_drawImages[i].extent = { _swapchainExtent.width, _swapchainExtent.height,1 };
+		_drawImages[i].format = VK_FORMAT_R16G16B16A16_UNORM;
+
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_drawImages[i].image, &_drawImages[i].alloc, nullptr) != VK_SUCCESS)
+			throw std::runtime_error("failed to create view image!");
+	}
+
+	// Create image views
+
+
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		imgView.image = _drawImages[i].image;
+		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imgView.format = VK_FORMAT_R16G16B16A16_UNORM;
+		imgView.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A }; // rgba
+		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+
+		if (vkCreateImageView(_device, &imgView, nullptr, &_drawImages[i].imageView) != VK_SUCCESS)
+			throw std::runtime_error("failed to create image view!");
+	}
+
+	deletionQueue.push([&]() {
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			vmaDestroyImage(allocator, _drawImages[i].image, _drawImages[i].alloc);
+			vkDestroyImageView(_device, _drawImages[i].imageView, nullptr);
+		}
 	});
 }
 

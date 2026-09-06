@@ -71,3 +71,11 @@ struct AllocatedMesh {
 
 	std::vector<MeshPrimitive> primitives;
 };
+
+struct AllocatedImage {
+	VkImage image;
+	VkImageView imageView;
+	VkExtent3D extent;
+	VkFormat format;
+	VmaAllocation alloc;
+};

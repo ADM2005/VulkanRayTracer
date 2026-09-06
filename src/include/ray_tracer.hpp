@@ -57,6 +57,8 @@ private:
 	VkExtent2D _swapchainExtent;
 	VkFormat _swapchainFormat;
 
+	std::vector<AllocatedImage> _drawImages;	// Per frame in flight
+
 	VkQueue _graphicsQueue;
 	uint32_t _graphicsQueueFamily;
 
@@ -103,6 +105,7 @@ private:
 	void init_vma();
 
 	void init_swapchain();
+	void init_draw_images();
 
 	void init_pipelines();
 
