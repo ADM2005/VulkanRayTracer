@@ -37,6 +37,7 @@ void RayTracer::init() {
 	init_vma();
 	init_swapchain();
 	init_draw_images();
+	init_depth_images();
 	create_uniform_buffers();
 	init_descriptors();
 	init_pipelines();
@@ -213,7 +214,7 @@ void RayTracer::init_draw_images() {
 
 	_drawImages.resize(FRAMES_IN_FLIGHT);
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		_drawImages[i].extent = { _swapchainExtent.width, _swapchainExtent.height,1 };
+		_drawImages[i].extent = _swapchainExtent;
 		_drawImages[i].format = VK_FORMAT_R16G16B16A16_UNORM;
 
 		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_drawImages[i].image, &_drawImages[i].alloc, nullptr) != VK_SUCCESS)
@@ -295,8 +296,8 @@ void RayTracer::init_gfx_pipeline() {
 
 	VkPipelineRasterizationStateCreateInfo rasterizer{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.cullMode = VK_CULL_MODE_NONE;
-	rasterizer.frontFace = VK_FRONT_FACE_CLOCKWISE;
+	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.lineWidth = 1.0f;
 
 	VkPipelineMultisampleStateCreateInfo multisampleState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
@@ -305,13 +306,14 @@ void RayTracer::init_gfx_pipeline() {
 
 
 	VkPipelineDepthStencilStateCreateInfo depthStencilState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
-	depthStencilState.depthTestEnable = VK_FALSE;
-	depthStencilState.depthWriteEnable = VK_FALSE;
-	depthStencilState.depthCompareOp = VK_COMPARE_OP_NEVER;
+	depthStencilState.depthTestEnable = VK_TRUE;
+	depthStencilState.depthWriteEnable = VK_TRUE;
+	depthStencilState.depthCompareOp = VK_COMPARE_OP_GREATER_OR_EQUAL;	// Larger depths are drawn because of reverse-z
 	depthStencilState.depthBoundsTestEnable = VK_FALSE;
 	depthStencilState.stencilTestEnable = VK_FALSE;
 	depthStencilState.minDepthBounds = 0.0;
 	depthStencilState.maxDepthBounds = 1.0;
+
 
 	VkPipelineColorBlendAttachmentState attachmentState{};
 	attachmentState.blendEnable = VK_FALSE;
@@ -325,14 +327,14 @@ void RayTracer::init_gfx_pipeline() {
 
 	VkDynamicState dynamicStates[2] = { VK_DYNAMIC_STATE_VIEWPORT	, VK_DYNAMIC_STATE_SCISSOR };
 
-
 	VkPipelineDynamicStateCreateInfo dynamicState{ .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
 	dynamicState.dynamicStateCount = 2;
 	dynamicState.pDynamicStates = dynamicStates;
 
 	VkPipelineRenderingCreateInfo pipelineRenderingInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
 	pipelineRenderingInfo.colorAttachmentCount = 1;
-	pipelineRenderingInfo.pColorAttachmentFormats = &_swapchainFormat;
+	pipelineRenderingInfo.pColorAttachmentFormats = &_drawImages[0].format;
+	pipelineRenderingInfo.depthAttachmentFormat = _depthImages[0].format;
 	
 	VkGraphicsPipelineCreateInfo gfxPipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 	gfxPipeline.pNext = &pipelineRenderingInfo;
@@ -502,10 +504,10 @@ void RayTracer::main_loop() {
 	}
 }
 
-void RayTracer::clear_screen(VkCommandBuffer cmd, VkImage img, VkImageLayout imgLayout,
+void RayTracer::clear_screen(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout,
 	VkImageLayout resultLayout) {
 
-	utils::transition_image_layout(cmd, img, _swapchainFormat, imgLayout,
+	utils::transition_image_layout(cmd, img.image, img.format, imgLayout,
 		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT,
 		VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_WRITE_BIT);
@@ -515,16 +517,16 @@ void RayTracer::clear_screen(VkCommandBuffer cmd, VkImage img, VkImageLayout img
 
 	VkImageSubresourceRange range = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
 
-	vkCmdClearColorImage(cmd, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	vkCmdClearColorImage(cmd, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		&clearColor, 1, &range);
 
-	utils::transition_image_layout(cmd, img, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+	utils::transition_image_layout(cmd, img.image, img.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
 		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
-void RayTracer::draw_imgui(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout imgLayout,
+void RayTracer::draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout,
 	VkImageLayout resultLayout) {
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
@@ -540,7 +542,7 @@ void RayTracer::draw_imgui(VkCommandBuffer cmd, uint32_t img_index, VkImageLayou
 	renderArea.offset = { 0,0 };
 
 	VkRenderingAttachmentInfo colorAttachment{.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
-	colorAttachment.imageView = _swapchainImageViews[img_index];
+	colorAttachment.imageView = img.imageView;
 	colorAttachment.imageLayout = imgLayout;
 	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -559,7 +561,7 @@ void RayTracer::draw_imgui(VkCommandBuffer cmd, uint32_t img_index, VkImageLayou
 
 	vkCmdEndRendering(cmd);
 
-	utils::transition_image_layout(cmd, _swapchainImages[img_index], _swapchainFormat, imgLayout,
+	utils::transition_image_layout(cmd, img.image, img.format, imgLayout,
 		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
 		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -587,7 +589,12 @@ void RayTracer::draw() {
 		_imageAvailableSemaphores[_currentFrame % FRAMES_IN_FLIGHT], VK_NULL_HANDLE,
 		&img_index);
 
-	VkImage img = _swapchainImages[img_index];
+	AllocatedImage drawImage = _drawImages[idx];
+	AllocatedImage depthImage = _depthImages[idx];
+
+	VkImage swapImage = _swapchainImages[img_index];
+	VkImageView swapImageView = _swapchainImageViews[img_index];
+
 	VkCommandBuffer cmd = _commandBuffers[idx];
 
 	vkResetCommandBuffer(cmd, 0);
@@ -597,13 +604,22 @@ void RayTracer::draw() {
 	beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
 	vkBeginCommandBuffer(cmd, &beginInfo);
 
-	clear_screen(cmd, img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	clear_screen(cmd, drawImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	
-	draw_gfx(cmd, img_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	utils::transition_image_layout(cmd, depthImage.image, depthImage.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	draw_imgui(cmd, img_index, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
+	draw_gfx(cmd, drawImage, depthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+	draw_imgui(cmd, drawImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+
+	// copy draw image to swapchain
+	utils::transition_image_layout(cmd, swapImage, _swapchainFormat, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+	utils::copy_image_to_image(cmd, drawImage.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_ASPECT_COLOR_BIT, drawImage.extent, swapImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		VK_IMAGE_ASPECT_COLOR_BIT, _swapchainExtent);
 
 
+	utils::transition_image_layout(cmd, swapImage, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT);
 	vkEndCommandBuffer(cmd);
 
 	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(_imageAvailableSemaphores[idx], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
@@ -630,20 +646,27 @@ void RayTracer::draw() {
 	_currentFrame++;
 }
 
-void RayTracer::draw_gfx(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout imgLayout, VkImageLayout resultLayout) {
-	VkRect2D area{ .offset={0,0}, .extent = _swapchainExtent};
+void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage depthImage, VkImageLayout imgLayout, VkImageLayout resultLayout) {
+	VkRect2D area{ .offset = {0,0}, .extent = img.extent };
 
 	VkRenderingAttachmentInfo attachInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-	attachInfo.imageView = _swapchainImageViews[img_index];
+	attachInfo.imageView = img.imageView;
 	attachInfo.imageLayout = imgLayout;
 	attachInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	attachInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+	VkRenderingAttachmentInfo depthInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
+	depthInfo.imageView = depthImage.imageView;
+	depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+	depthInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	depthInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
 	VkRenderingInfo rendInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO };
 	rendInfo.renderArea = area;
 	rendInfo.layerCount = 1;
 	rendInfo.colorAttachmentCount = 1;
 	rendInfo.pColorAttachments = &attachInfo;
+	rendInfo.pDepthAttachment = &depthInfo;
 
 	ViewUBO view{};
 	view.view = glm::translate(glm::mat4{ 1 }, { 0,0,-5 });
@@ -695,7 +718,7 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, uint32_t img_index, VkImageLayout 
 
 	vkCmdEndRendering(cmd);
 
-	utils::transition_image_layout(cmd, _swapchainImages[img_index], _swapchainFormat, imgLayout,
+	utils::transition_image_layout(cmd, img.image, img.format, imgLayout,
 		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
 		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -843,7 +866,7 @@ void RayTracer::init_imgui() {
 
 	VkPipelineRenderingCreateInfo pipelineRenderingInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
 	pipelineRenderingInfo.colorAttachmentCount = 1;
-	pipelineRenderingInfo.pColorAttachmentFormats = &_swapchainFormat;
+	pipelineRenderingInfo.pColorAttachmentFormats = &_drawImages[0].format;
 	pipelineRenderingInfo.viewMask = 0;	// No multiview
 
 
@@ -946,5 +969,54 @@ void RayTracer::create_uniform_buffers(){
 		vmaDestroyBuffer(allocator, viewUBO.buffer, viewUBO.alloc);
 		vmaDestroyBuffer(allocator, meshUBO.buffer, meshUBO.alloc);
 
+		});
+}
+
+void RayTracer::init_depth_images() {
+	VkImageCreateInfo imgCreate{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	imgCreate.imageType = VK_IMAGE_TYPE_2D;
+	imgCreate.format = VK_FORMAT_D32_SFLOAT;
+	imgCreate.extent = { _drawImages[0].extent.width, _drawImages[0].extent.height, 1};
+	imgCreate.mipLevels = 1;
+	imgCreate.arrayLayers = 1;
+	imgCreate.samples = VK_SAMPLE_COUNT_1_BIT;
+	imgCreate.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imgCreate.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+	imgCreate.sharingMode = VK_SHARING_MODE_EXCLUSIVE; // for now as only using one queue
+	imgCreate.queueFamilyIndexCount = 1;
+	imgCreate.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+	VmaAllocationCreateInfo allocCreate{};
+	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	_depthImages.resize(FRAMES_IN_FLIGHT);
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		_depthImages[i].extent = _swapchainExtent;
+		_depthImages[i].format = VK_FORMAT_D32_SFLOAT;
+
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_depthImages[i].image, &_depthImages[i].alloc, nullptr) != VK_SUCCESS)
+			throw std::runtime_error("failed to create depth image!");
+	}
+
+	// Create image views
+
+
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		imgView.image = _depthImages[i].image;
+		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imgView.format = VK_FORMAT_D32_SFLOAT;
+		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_DEPTH_BIT);
+
+		if (vkCreateImageView(_device, &imgView, nullptr, &_depthImages[i].imageView) != VK_SUCCESS)
+			throw std::runtime_error("failed to create image view!");
+	}
+
+	deletionQueue.push([&]() {
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			vmaDestroyImage(allocator, _depthImages[i].image, _depthImages[i].alloc);
+			vkDestroyImageView(_device, _depthImages[i].imageView, nullptr);
+		}
 		});
 }

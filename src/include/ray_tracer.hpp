@@ -58,6 +58,7 @@ private:
 	VkFormat _swapchainFormat;
 
 	std::vector<AllocatedImage> _drawImages;	// Per frame in flight
+	std::vector<AllocatedImage> _depthImages;
 
 	VkQueue _graphicsQueue;
 	uint32_t _graphicsQueueFamily;
@@ -106,6 +107,7 @@ private:
 
 	void init_swapchain();
 	void init_draw_images();
+	void init_depth_images();
 
 	void init_pipelines();
 
@@ -134,11 +136,11 @@ private:
 
 	void draw();
 
-	void clear_screen(VkCommandBuffer cmd, VkImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
+	void clear_screen(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
-	void draw_imgui(VkCommandBuffer cmd, uint32_t idx, VkImageLayout imgLayout, VkImageLayout resultLayout);
+	void draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
-	void draw_gfx(VkCommandBuffer cmd, uint32_t idx, VkImageLayout imgLayout, VkImageLayout resultLayout);
+	void draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage depthImage, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 	void present_swapchain_image(uint32_t idx);
 };

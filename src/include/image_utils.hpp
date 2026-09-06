@@ -52,12 +52,11 @@ namespace utils {
 		VkImage srcImage,
 		VkImageLayout srcImageLayout,
 		VkImageAspectFlags srcAspect,
-		VkRect2D srcExtent,
+		VkExtent2D srcExtent,
 
 		VkImage dstImage,
 		VkImageLayout dstImageLayout,
 		VkImageAspectFlags dstAspect,
-		VkRect2D dstExtent
-
+		VkExtent2D dstExtent
 	);
 }

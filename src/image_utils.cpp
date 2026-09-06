@@ -116,3 +116,37 @@ void utils::transition_image_layout(
 	vkCmdPipelineBarrier2(cmd, &dependency);
 }
 
+void utils::copy_image_to_image(
+	VkCommandBuffer cmd,
+
+	VkImage srcImage,
+	VkImageLayout srcImageLayout,
+	VkImageAspectFlags srcAspect,
+	VkExtent2D srcExtent,
+
+	VkImage dstImage,
+	VkImageLayout dstImageLayout,
+	VkImageAspectFlags dstAspect,
+	VkExtent2D dstExtent
+) {
+	VkImageBlit2 region{VK_STRUCTURE_TYPE_IMAGE_BLIT_2};
+	region.srcSubresource = { srcAspect, 0, 0, 1 };
+	region.srcOffsets[0] = { 0,0,0 };
+	region.srcOffsets[1] = { (int)srcExtent.width, (int)srcExtent.height, 1 };
+	
+	region.dstSubresource = { dstAspect, 0, 0, 1 };
+	region.dstOffsets[0] = { 0,0,0 };
+	region.dstOffsets[1] = { (int)dstExtent.width, (int)dstExtent.height, 1 };
+
+	VkBlitImageInfo2 blitInfo{ VK_STRUCTURE_TYPE_BLIT_IMAGE_INFO_2 };
+	blitInfo.srcImage = srcImage;
+	blitInfo.srcImageLayout = srcImageLayout;
+	blitInfo.dstImage = dstImage;
+	blitInfo.dstImageLayout = dstImageLayout;
+	blitInfo.regionCount = 1;
+	blitInfo.pRegions = &region;
+
+	blitInfo.filter = VK_FILTER_LINEAR;	// linear interpolation
+
+	vkCmdBlitImage2(cmd, &blitInfo);
+}

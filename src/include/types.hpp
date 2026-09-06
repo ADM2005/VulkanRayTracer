@@ -75,7 +75,7 @@ struct AllocatedMesh {
 struct AllocatedImage {
 	VkImage image;
 	VkImageView imageView;
-	VkExtent3D extent;
+	VkExtent2D extent;
 	VkFormat format;
 	VmaAllocation alloc;
 };
