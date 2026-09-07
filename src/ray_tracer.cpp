@@ -21,11 +21,10 @@
 #include <cmath>
 #include <iterator>
 
-
 constexpr bool enableValidationLayers = true;
 
-const uint32_t width = 1920;
-const uint32_t height = 1080;
+const uint32_t width = 2100;
+const uint32_t height = 1200;
 
 const char* requiredExtensions[]{
 	VK_KHR_SWAPCHAIN_EXTENSION_NAME,
@@ -36,13 +35,14 @@ void RayTracer::init() {
 	init_vulkan();
 	init_vma();
 	init_swapchain();
+	init_commands();
+	init_sync_structures();
 	init_draw_images();
 	init_depth_images();
 	create_uniform_buffers();
+	create_compute_buffers();
 	init_descriptors();
 	init_pipelines();
-	init_sync_structures();
-	init_commands();
 	init_imgui();
 	load_scene();
 }
@@ -151,6 +151,14 @@ void RayTracer::select_device(vkb::Instance& instance) {
 	_presentationQueue = present_queue_index_ret.value().first;
 	_presentationQueueFamily = present_queue_index_ret.value().second;
 
+	auto compute_queue_index_ret = _vkb_device.get_queue_and_index(vkb::QueueType::compute);
+	if (!compute_queue_index_ret) {
+		throw std::runtime_error("failed to find compute queue!");
+	}
+
+	_computeQueue = compute_queue_index_ret.value().first;
+	_computeQueueFamily = compute_queue_index_ret.value().second;
+
 	std::cout << "Device: " << _vkb_device.physical_device.name << '\n';
 	
 	deletionQueue.push([=]() {
@@ -194,8 +202,8 @@ void RayTracer::init_swapchain() {
 	});
 }
 
-void RayTracer::init_draw_images() {
-	VkImageCreateInfo imgCreate{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+void RayTracer::init_graphics_images() {
+	VkImageCreateInfo imgCreate{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	imgCreate.imageType = VK_IMAGE_TYPE_2D;
 	imgCreate.format = VK_FORMAT_R16G16B16A16_UNORM;
 	imgCreate.extent = { _swapchainExtent.width, _swapchainExtent.height, 1 };
@@ -222,8 +230,6 @@ void RayTracer::init_draw_images() {
 	}
 
 	// Create image views
-
-
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
 		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		imgView.image = _drawImages[i].image;
@@ -241,7 +247,90 @@ void RayTracer::init_draw_images() {
 			vmaDestroyImage(allocator, _drawImages[i].image, _drawImages[i].alloc);
 			vkDestroyImageView(_device, _drawImages[i].imageView, nullptr);
 		}
+		});
+}
+
+void RayTracer::init_compute_images() {
+
+
+	uint32_t queueFamilies[] { _computeQueueFamily, _graphicsQueueFamily };
+
+	VkImageCreateInfo imgCreate{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+	imgCreate.imageType = VK_IMAGE_TYPE_2D;
+	imgCreate.format = VK_FORMAT_R16G16B16A16_UNORM;
+	imgCreate.extent = { _swapchainExtent.width, _swapchainExtent.height, 1 };
+	imgCreate.mipLevels = 1;
+	imgCreate.arrayLayers = 1;
+	imgCreate.samples = VK_SAMPLE_COUNT_1_BIT;
+	imgCreate.tiling = VK_IMAGE_TILING_OPTIMAL;
+	imgCreate.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
+	imgCreate.sharingMode = VK_SHARING_MODE_CONCURRENT; 
+	imgCreate.queueFamilyIndexCount = 2;
+	imgCreate.pQueueFamilyIndices = queueFamilies;
+	imgCreate.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VmaAllocationCreateInfo allocCreate{};
+	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	_rtImages.resize(FRAMES_IN_FLIGHT);
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		_rtImages[i].extent = _swapchainExtent;
+		_rtImages[i].format = VK_FORMAT_R16G16B16A16_UNORM;
+
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_rtImages[i].image, &_rtImages[i].alloc, nullptr) != VK_SUCCESS)
+			throw std::runtime_error("failed to create view image!");
+	}
+
+	// Pre-initialise images and transition them to general layouts
+	immediate_submit([&](VkCommandBuffer cmd) {
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedImage allocImg = _rtImages[i];
+			utils::transition_image_layout(cmd, allocImg.image, allocImg.format,
+				VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+				VK_IMAGE_ASPECT_COLOR_BIT);
+		}
+
+		const VkClearColorValue clear{ 0.0,0.0,0.0,0.0 };
+		VkImageSubresourceRange colorRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedImage allocImg = _rtImages[i];
+			vkCmdClearColorImage(cmd, allocImg.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &colorRange);
+		}
+
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedImage allocImg = _rtImages[i];
+			utils::transition_image_layout(cmd, allocImg.image, allocImg.format,
+				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,
+				VK_IMAGE_ASPECT_COLOR_BIT);
+		}
+		});
+
+
+	// Create image views
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
+		imgView.image = _rtImages[i].image;
+		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
+		imgView.format = VK_FORMAT_R16G16B16A16_UNORM;
+		imgView.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A }; // rgba
+		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
+
+		if (vkCreateImageView(_device, &imgView, nullptr, &_rtImages[i].imageView) != VK_SUCCESS)
+			throw std::runtime_error("failed to create image view!");
+	}
+
+	deletionQueue.push([&]() {
+		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			vmaDestroyImage(allocator, _rtImages[i].image, _rtImages[i].alloc);
+			vkDestroyImageView(_device, _rtImages[i].imageView, nullptr);
+		}
 	});
+}
+void RayTracer::init_draw_images() {
+	init_graphics_images();
+	init_compute_images();
 }
 
 void RayTracer::init_pipelines() {
@@ -365,7 +454,45 @@ void RayTracer::init_gfx_pipeline() {
 }
 
 void RayTracer::init_rt_pipeline() {
+
+	VkPushConstantRange pcRange{};
+	pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+	pcRange.offset = 0;
+	pcRange.size = sizeof(ComputePC);
+
+	VkDescriptorSetLayout layouts[]{ _rtDescriptorLayout };
+
+	VkPipelineLayoutCreateInfo layoutCreateInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+	layoutCreateInfo.setLayoutCount = std::size(layouts);
+	layoutCreateInfo.pSetLayouts = layouts;
+	layoutCreateInfo.pushConstantRangeCount = 1;
+	layoutCreateInfo.pPushConstantRanges = &pcRange;
+
+	if (vkCreatePipelineLayout(_device, &layoutCreateInfo, nullptr, &_computeRTPipelineLayout) != VK_SUCCESS)
+		throw std::runtime_error("failed to create RT pipeline layout!");
+
+	VkShaderModule computeShader = loaders::load_shader("../../shaders/compute/bin/basic.comp.spv", _device);
+	VkPipelineShaderStageCreateInfo shaderInfo{ VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO };
+	shaderInfo.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+	shaderInfo.module = computeShader;
+	shaderInfo.pName = "main";
+
+	VkComputePipelineCreateInfo createInfo{ VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+	createInfo.stage = shaderInfo;
+	createInfo.layout = _computeRTPipelineLayout;
+
+	if (vkCreateComputePipelines(_device, VK_NULL_HANDLE, 1, &createInfo, nullptr, &_computeRTPipeline) != VK_SUCCESS)
+		throw std::runtime_error("failed to create RT compute pipeline!");
+
+
+	vkDestroyShaderModule(_device, computeShader, nullptr); // shader module no longer needed
+
+	deletionQueue.push([&]() {
+		vkDestroyPipeline(_device, _computeRTPipeline, nullptr);
+		vkDestroyPipelineLayout(_device, _computeRTPipelineLayout, nullptr);
+		});
 }
+
 
 void RayTracer::init_imm_commands() {
 	VkCommandPoolCreateInfo poolCreateInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -531,7 +658,13 @@ void RayTracer::draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayou
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
 	ImGui::NewFrame();
+	static bool open = true;
 
+	ImGui::Begin("Suzanne Info", &open, ImGuiWindowFlags_AlwaysAutoResize);
+
+
+
+	ImGui::End();
 	ImGui::Render();
 
 
@@ -608,6 +741,8 @@ void RayTracer::draw() {
 	
 	utils::transition_image_layout(cmd, depthImage.image, depthImage.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 
+	draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
 	draw_gfx(cmd, drawImage, depthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	draw_imgui(cmd, drawImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
@@ -669,12 +804,19 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage
 	rendInfo.pDepthAttachment = &depthInfo;
 
 	ViewUBO view{};
-	view.view = glm::translate(glm::mat4{ 1 }, { 0,0,-5 });
+	view.view = glm::translate(glm::mat4{ 1 }, _monkeyPos);
 	view.proj = glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f);
 	view.proj[1][1] *= -1; // account for vulkan flipped y-direction
 
 	MeshUBO mesh{};
-	mesh.model = glm::mat4{ 1 };
+
+
+	glm::quat rotationQuat(_monkeyAngles);
+	glm::mat4 rot = glm::mat4_cast(rotationQuat);
+	
+	glm::mat4 model = glm::scale( rot, _monkeyScale );
+
+	mesh.model = model;
 
 	memcpy(viewUBO.allocInfo.pMappedData, &view, sizeof(view));
 	memcpy(meshUBO.allocInfo.pMappedData, &mesh, sizeof(mesh));
@@ -724,6 +866,51 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage
 		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
+void RayTracer::draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout) {
+
+	AllocatedImage draw_image = _rtImages[_currentFrame % FRAMES_IN_FLIGHT];
+	AllocatedImage history_image = (_currentFrame % FRAMES_IN_FLIGHT == 0) ? _rtImages[FRAMES_IN_FLIGHT - 1] : _rtImages[_currentFrame % FRAMES_IN_FLIGHT - 1];
+
+	AllocatedImage drawGFXImage = _drawImages[_currentFrame % FRAMES_IN_FLIGHT];
+
+	ComputePC pc{};
+	pc.frameNumber = glm::int16((short)_currentFrame);
+
+	ComputeUBO ubo{};
+
+	ubo.viewInv = glm::inverse(glm::translate(glm::mat4{ 1 }, { 0,0,-5 }));
+	ubo.projInv = glm::inverse(glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f));
+	ubo.imageSize = glm::ivec2(draw_image.extent.width, draw_image.extent.height);
+
+	memcpy(computeUBO.allocInfo.pMappedData, &ubo, sizeof(ubo));
+
+	VkDescriptorSet sets[]{ _rtDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT] };
+	
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _computeRTPipelineLayout,
+		0, 1, sets, 0, nullptr);
+
+	vkCmdPushConstants(cmd, _computeRTPipelineLayout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
+
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _computeRTPipeline);
+
+	vkCmdDispatch(cmd, std::ceil(draw_image.extent.width / 8.0f), std::ceil(draw_image.extent.height / 8.0f), 1.0f);
+
+	utils::transition_image_layout(cmd, draw_image.image, draw_image.format, VK_IMAGE_LAYOUT_GENERAL,
+		VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	utils::transition_image_layout(cmd, drawGFXImage.image, drawGFXImage.format, imgLayout,
+		VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	utils::copy_image_to_image(cmd, draw_image.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT,
+		draw_image.extent, drawGFXImage.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, drawGFXImage.extent);
+
+	utils::transition_image_layout(cmd, draw_image.image, draw_image.format, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+		VK_IMAGE_LAYOUT_GENERAL, VK_IMAGE_ASPECT_COLOR_BIT);
+
+	utils::transition_image_layout(cmd, drawGFXImage.image, drawGFXImage.format, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT);
+}
+
 void RayTracer::cleanup() {
 	vkDeviceWaitIdle(_device);
 	deletionQueue.flush();
@@ -737,8 +924,93 @@ void RayTracer::init_descriptors() {
 
 void RayTracer::create_descriptor_layouts() {
 	create_gfx_descriptors();
+	create_rt_descriptors();
 }
 
+void RayTracer::create_rt_descriptors() {
+	VkDescriptorSetLayoutBinding imageBinding{};
+	imageBinding.binding = 0;
+	imageBinding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+	imageBinding.descriptorCount = 2;
+	imageBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkDescriptorSetLayoutBinding uniformBinding{};
+	uniformBinding.binding = 1;
+	uniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+	uniformBinding.descriptorCount = 1;
+	uniformBinding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+	VkDescriptorSetLayoutBinding bindings[]{ imageBinding, uniformBinding };
+
+	VkDescriptorSetLayoutCreateInfo layoutInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
+	layoutInfo.bindingCount = std::size(bindings);
+	layoutInfo.pBindings = bindings;
+
+	if (vkCreateDescriptorSetLayout(_device, &layoutInfo, nullptr, &_rtDescriptorLayout) != VK_SUCCESS)
+		throw std::runtime_error("failed to create descriptor set layout for compute shader");
+
+
+	VkDescriptorSetLayout layouts[]{ _rtDescriptorLayout, _rtDescriptorLayout };
+
+	_rtDescriptorSets.resize(FRAMES_IN_FLIGHT);
+
+	VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
+	allocInfo.descriptorPool = _descriptorPool;
+	allocInfo.descriptorSetCount = FRAMES_IN_FLIGHT;
+	allocInfo.pSetLayouts = layouts;
+
+	if(vkAllocateDescriptorSets(_device, &allocInfo, _rtDescriptorSets.data()) != VK_SUCCESS)
+		throw std::runtime_error("failed to allocate descriptor sets for compute shader");
+
+	// Now write the descriptors
+
+
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedImage drawImage = _rtImages[i];
+		AllocatedImage historyImage = (i == 0) ? _rtImages[FRAMES_IN_FLIGHT-1] : _rtImages[i - 1];
+
+		VkDescriptorImageInfo drawImageInfo{};
+		drawImageInfo.imageView = drawImage.imageView;
+		drawImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+
+		VkDescriptorImageInfo historyImageInfo{};
+		historyImageInfo.imageView = historyImage.imageView;
+		historyImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+		VkDescriptorImageInfo imageWrites[2]{ drawImageInfo, historyImageInfo };
+
+		VkWriteDescriptorSet imageWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+		imageWrite.dstSet = _rtDescriptorSets[i];
+		imageWrite.dstBinding = 0;
+		imageWrite.dstArrayElement = 0;
+		imageWrite.descriptorCount = 2;
+		imageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+		imageWrite.pImageInfo = imageWrites;
+
+		AllocatedBuffer ubo = computeUBO;
+
+		VkDescriptorBufferInfo bufferInfo{};
+		bufferInfo.buffer = ubo.buffer;
+		bufferInfo.offset = 0;
+		bufferInfo.range = sizeof(ComputeUBO);
+
+		VkWriteDescriptorSet uboWrite{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+		uboWrite.dstSet = _rtDescriptorSets[i];
+		uboWrite.dstBinding = 1;
+		uboWrite.dstArrayElement = 0;
+		uboWrite.descriptorCount = 1;
+		uboWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+		uboWrite.pBufferInfo = &bufferInfo;
+
+		VkWriteDescriptorSet writes[2]{ imageWrite, uboWrite };
+
+		vkUpdateDescriptorSets(_device, std::size(writes), writes, 0, nullptr);
+	}
+	deletionQueue.push([&]() {
+		vkDestroyDescriptorSetLayout(_device, _rtDescriptorLayout, nullptr);
+		});
+}
 void RayTracer::create_gfx_descriptors() {
 	VkDescriptorSetLayoutBinding perFrameUniformBinding{}; // View and Projection Matrices
 	perFrameUniformBinding.binding = 0;
@@ -839,7 +1111,8 @@ void RayTracer::create_descriptor_pool() {
 	{
 		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLED_IMAGE_POOL_SIZE},
 		{ VK_DESCRIPTOR_TYPE_SAMPLER, IMGUI_IMPL_VULKAN_MINIMUM_SAMPLER_POOL_SIZE},
-		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1},
+		{ VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2},
+		{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4},
 		{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4}
 	};
 
@@ -972,6 +1245,28 @@ void RayTracer::create_uniform_buffers(){
 		});
 }
 
+void RayTracer::create_compute_buffers() {
+	// View Buffer
+	VkBufferCreateInfo compBufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	compBufferInfo.size = sizeof(ComputeUBO);
+	compBufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+	compBufferInfo.queueFamilyIndexCount = 1;
+	compBufferInfo.pQueueFamilyIndices = &_computeQueueFamily;
+
+	VmaAllocationCreateInfo compBufferAllocInfo{};
+	compBufferAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	compBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	compBufferAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	if (vmaCreateBuffer(allocator, &compBufferInfo, &compBufferAllocInfo, &computeUBO.buffer, &computeUBO.alloc, &computeUBO.allocInfo)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create view UBO!");
+	}
+
+	deletionQueue.push([&]() {
+		vmaDestroyBuffer(allocator, computeUBO.buffer, computeUBO.alloc);
+		});
+}
 void RayTracer::init_depth_images() {
 	VkImageCreateInfo imgCreate{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	imgCreate.imageType = VK_IMAGE_TYPE_2D;

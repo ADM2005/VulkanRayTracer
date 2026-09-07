@@ -1,0 +1,35 @@
+#version 430
+
+layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(set = 0, binding = 0, rgba16) uniform image2D images[2];
+
+
+layout(set = 0, binding = 1) uniform UBO{
+    mat4 projInv;
+    mat4 viewInv;
+    ivec2 imageSize;
+} ubo;
+
+layout(std430, push_constant) uniform Pc{
+    int frameNumber;
+}pc ;
+
+void main(){
+    ivec2 imageSize = ubo.imageSize;
+
+
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    if(id.x >= imageSize.x || id.y >= imageSize.y){
+        return;
+    }
+
+    vec4 inc;
+    if(pc.frameNumber % 2 == 0){
+        inc = vec4(0.001, 0.0, 0.0, 0.0);
+    }else{
+        inc = vec4(0.0, 0.0, 0.001, 0.0);
+    }
+    vec4 color = imageLoad(images[1], id) + inc;
+    imageStore(images[0], id, color);
+}

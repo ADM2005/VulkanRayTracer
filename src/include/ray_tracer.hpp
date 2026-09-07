@@ -30,6 +30,10 @@ public:
 
 private:
 
+	glm::vec3 _monkeyPos{0, 0, -5};
+	glm::vec3 _monkeyAngles{0, 0, 0};
+	glm::vec3 _monkeyScale{ 1, 1, 1 };
+
 	uint32_t _currentFrame{ 0 };
 
 	VkCommandPool _commandPool;
@@ -46,6 +50,8 @@ private:
 
 	AllocatedBuffer viewUBO{};		// Projection and View
 	AllocatedBuffer meshUBO{};		// Model matrix (potentially textures/samplers later on)
+
+	AllocatedBuffer computeUBO{};
 
 	SDL_Window* _pWindow;
 	VkSurfaceKHR _surface;
@@ -66,6 +72,10 @@ private:
 	VkQueue _presentationQueue;
 	uint32_t _presentationQueueFamily;
 	
+	VkQueue _computeQueue;
+	uint32_t _computeQueueFamily;
+	std::vector<AllocatedImage> _rtImages;
+
 	VkInstance _instance;
 
 	VkDevice _device;
@@ -86,8 +96,15 @@ private:
 	VkDescriptorSetLayout _perMeshGFXLayout;
 	std::vector<VkDescriptorSet> _perMeshGFXDescriptorSets;
 
+
+
 	VkPipelineLayout _computeRTPipelineLayout;
 	VkPipeline _computeRTPipeline;
+
+	VkDescriptorSetLayout _rtDescriptorLayout;
+
+	std::vector<VkDescriptorSet> _rtDescriptorSets;
+
 
 	VkDescriptorPool _descriptorPool;
 
@@ -107,6 +124,9 @@ private:
 
 	void init_swapchain();
 	void init_draw_images();
+	void init_graphics_images();
+	void init_compute_images();
+
 	void init_depth_images();
 
 	void init_pipelines();
@@ -123,8 +143,11 @@ private:
 
 	void create_descriptor_layouts();
 	void create_gfx_descriptors();
+	void create_rt_descriptors();
+	void create_rt_image_descriptors();
 
 	void create_uniform_buffers();
+	void create_compute_buffers();
 
 	void init_imgui();
 
@@ -141,6 +164,9 @@ private:
 	void draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 	void draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage depthImage, VkImageLayout imgLayout, VkImageLayout resultLayout);
+
+	void draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout);
+
 
 	void present_swapchain_image(uint32_t idx);
 };

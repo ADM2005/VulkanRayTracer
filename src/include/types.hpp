@@ -7,6 +7,7 @@
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 struct GFXPushConstants {
 	VkDeviceAddress vertAddress;
@@ -51,6 +52,17 @@ struct ViewUBO {
 
 struct MeshUBO {
 	glm::mat4x4 model;
+};
+
+struct ComputeUBO {
+	glm::mat4x4 viewInv;
+	glm::mat4x4 projInv;
+	glm::ivec2 imageSize;
+};
+
+struct ComputePC {
+	glm::int16 frameNumber;
+	glm::int16 scratch;
 };
 
 struct MeshPrimitive {
