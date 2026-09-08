@@ -55,8 +55,8 @@ struct MeshUBO {
 };
 
 struct ComputeUBO {
-	glm::mat4x4 viewInv;
 	glm::mat4x4 projInv;
+	glm::mat4x4 viewInv;
 	glm::ivec2 imageSize;
 };
 

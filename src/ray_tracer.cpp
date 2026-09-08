@@ -743,7 +743,7 @@ void RayTracer::draw() {
 
 	draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-	draw_gfx(cmd, drawImage, depthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	//draw_gfx(cmd, drawImage, depthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	draw_imgui(cmd, drawImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -879,7 +879,11 @@ void RayTracer::draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkIma
 	ComputeUBO ubo{};
 
 	ubo.viewInv = glm::inverse(glm::translate(glm::mat4{ 1 }, { 0,0,-5 }));
-	ubo.projInv = glm::inverse(glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f));
+
+	glm::mat4 proj = glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f);
+	//proj[1][1] *= -1;
+
+	ubo.projInv = glm::inverse(proj);
 	ubo.imageSize = glm::ivec2(draw_image.extent.width, draw_image.extent.height);
 
 	memcpy(computeUBO.allocInfo.pMappedData, &ubo, sizeof(ubo));
