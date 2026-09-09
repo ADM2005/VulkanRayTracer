@@ -10,15 +10,18 @@
 
 #include <vk_mem_alloc.h>
 
+#include "scene.hpp"
+
 constexpr int FRAMES_IN_FLIGHT = 2;
 
 class RayTracer {
-public: 
+public:
 
 	VmaAllocator allocator;
 
 	DeletionQueue deletionQueue;
 
+	VkDevice _device;
 
 	void init();
 
@@ -30,14 +33,44 @@ public:
 
 private:
 
+	struct FrameData {
+		// For graphics
+		VkCommandBuffer cmd;
+
+		AllocatedBuffer materialBuffer{};				// Stores all material data
+		AllocatedBuffer objectBuffer{};
+		AllocatedBuffer viewUBO{};
+
+		AllocatedImage drawImage;
+		AllocatedImage depthImage;
+
+
+		VkDescriptorSet viewDescriptorSet;
+
+
+		// For compute
+		AllocatedImage rtImage;
+		AllocatedImage historyImage;
+
+		VkDescriptorSet rtDescriptorSet;
+
+
+		// Both
+		VkFence renderFinishedFence;
+		VkSemaphore imageAvailableSemaphore;
+	};
+
+	std::vector<FrameData> frameData{ FRAMES_IN_FLIGHT };
+	uint32_t _currentFrame{ 0 };
+
+	Scene scene{};
+
 	glm::vec3 _monkeyPos{0, 0, -5};
 	glm::vec3 _monkeyAngles{0, 0, 0};
 	glm::vec3 _monkeyScale{ 1, 1, 1 };
 
-	uint32_t _currentFrame{ 0 };
 
 	VkCommandPool _commandPool;
-	std::vector<VkCommandBuffer> _commandBuffers;
 
 	VkCommandPool _immCommandPool;
 	VkCommandBuffer _immCommandBuffer;
@@ -48,8 +81,6 @@ private:
 	AllocatedMesh selectedMesh;
 	VkDeviceAddress vertAddress;
 
-	AllocatedBuffer viewUBO{};		// Projection and View
-	AllocatedBuffer meshUBO{};		// Model matrix (potentially textures/samplers later on)
 
 	AllocatedBuffer computeUBO{};
 
@@ -78,7 +109,6 @@ private:
 
 	VkInstance _instance;
 
-	VkDevice _device;
 	vkb::Device _vkb_device;
 
 	VkPhysicalDevice _physical_device;
@@ -163,7 +193,12 @@ private:
 
 	void draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
-	void draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage depthImage, VkImageLayout imgLayout, VkImageLayout resultLayout);
+	template<typename T>
+	void draw_object_menus(const char* tabName, std::vector<T>& objects, T*& selectedItem);
+
+	void draw_gfx(VkCommandBuffer cmd, FrameData& frame, VkImageLayout imgLayout, VkImageLayout resultLayout);
+
+	void update_scene_buffers(FrameData& frame);
 
 	void draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout);
 

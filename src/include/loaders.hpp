@@ -6,6 +6,8 @@
 #include <optional>
 #include "ray_tracer.hpp"
 
+#include "scene.hpp"
+
 namespace loaders {
 	VkShaderModule load_shader(const char* filepath, VkDevice device);
 
@@ -13,4 +15,6 @@ namespace loaders {
 	// Each mesh gets a unique AllocatedMesh struct, which lists out the primitives inside.
 
 	std::optional<std::vector<AllocatedMesh>> load_gltf_meshes(const char* filepath, RayTracer* rt);
+
+	void load_scene(const char* filepath, RayTracer* rt, Scene& scene);
 }

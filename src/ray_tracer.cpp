@@ -1,5 +1,6 @@
 #define VMA_IMPLEMENTATION
 #define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_ENABLE_EXPERIMENTAL
 
 #include "include/ray_tracer.hpp"
 #include <iostream>
@@ -13,11 +14,7 @@
 #include "include/image_utils.hpp"
 #include "include/vk_initialisers.hpp"
 #include "include/loaders.hpp"
-
-#include <imgui/imgui.h>
-#include <imgui/backends/imgui_impl_vulkan.h>
-#include <imgui/backends/imgui_impl_sdl3.h>
-
+#include <glm/gtx/string_cast.hpp>
 #include <cmath>
 #include <iterator>
 
@@ -48,6 +45,7 @@ void RayTracer::init() {
 }
 
 void RayTracer::create_window() {
+	SDL_Init(SDL_INIT_VIDEO);
 	_pWindow = SDL_CreateWindow("Super Awesome Ray Tracer", width, height,
 		SDL_WINDOW_VULKAN);
 
@@ -72,14 +70,13 @@ vkb::Instance RayTracer::create_instance() {
 	vkb::InstanceBuilder instanceBuilder;
 
 	uint32_t sdlExtensionCount;
-	auto sdlExtensions = *SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
+	const char* const* sdlExtensions = SDL_Vulkan_GetInstanceExtensions(&sdlExtensionCount);
 
-	const char* const extensions[]{ sdlExtensions };
 
 	auto instanceRet = instanceBuilder
 		.set_app_name("Vulkan Ray Tracer")
 		.set_engine_name("Adam's Awesome Ray Tracing Engine")
-		.enable_extensions(extensions)
+		.enable_extensions(sdlExtensionCount, sdlExtensions)
 		.use_default_debug_messenger()
 		.enable_validation_layers(enableValidationLayers)
 
@@ -220,32 +217,35 @@ void RayTracer::init_graphics_images() {
 	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-	_drawImages.resize(FRAMES_IN_FLIGHT);
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		_drawImages[i].extent = _swapchainExtent;
-		_drawImages[i].format = VK_FORMAT_R16G16B16A16_UNORM;
+		AllocatedImage& img = frameData[i].drawImage;
+		img.extent = _swapchainExtent;
+		img.format = VK_FORMAT_R16G16B16A16_UNORM;
 
-		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_drawImages[i].image, &_drawImages[i].alloc, nullptr) != VK_SUCCESS)
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &img.image, &img.alloc, nullptr) != VK_SUCCESS)
 			throw std::runtime_error("failed to create view image!");
 	}
 
 	// Create image views
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedImage& img = frameData[i].drawImage;
+
 		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		imgView.image = _drawImages[i].image;
+		imgView.image = img.image;
 		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		imgView.format = VK_FORMAT_R16G16B16A16_UNORM;
 		imgView.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A }; // rgba
 		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
 
-		if (vkCreateImageView(_device, &imgView, nullptr, &_drawImages[i].imageView) != VK_SUCCESS)
+		if (vkCreateImageView(_device, &imgView, nullptr, &img.imageView) != VK_SUCCESS)
 			throw std::runtime_error("failed to create image view!");
 	}
 
 	deletionQueue.push([&]() {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			vmaDestroyImage(allocator, _drawImages[i].image, _drawImages[i].alloc);
-			vkDestroyImageView(_device, _drawImages[i].imageView, nullptr);
+			AllocatedImage& img = frameData[i].drawImage;
+			vmaDestroyImage(allocator, img.image, img.alloc);
+			vkDestroyImageView(_device, img.imageView, nullptr);
 		}
 		});
 }
@@ -273,19 +273,20 @@ void RayTracer::init_compute_images() {
 	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-	_rtImages.resize(FRAMES_IN_FLIGHT);
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		_rtImages[i].extent = _swapchainExtent;
-		_rtImages[i].format = VK_FORMAT_R16G16B16A16_UNORM;
+		AllocatedImage& img = frameData[i].rtImage;
+		img.extent = _swapchainExtent;
+		img.format = VK_FORMAT_R16G16B16A16_UNORM;
 
-		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_rtImages[i].image, &_rtImages[i].alloc, nullptr) != VK_SUCCESS)
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &img.image, &img.alloc, nullptr) != VK_SUCCESS)
 			throw std::runtime_error("failed to create view image!");
 	}
 
 	// Pre-initialise images and transition them to general layouts
 	immediate_submit([&](VkCommandBuffer cmd) {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			AllocatedImage allocImg = _rtImages[i];
+
+			AllocatedImage& allocImg = frameData[i].rtImage;
 			utils::transition_image_layout(cmd, allocImg.image, allocImg.format,
 				VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
 				VK_IMAGE_ASPECT_COLOR_BIT);
@@ -295,12 +296,12 @@ void RayTracer::init_compute_images() {
 		VkImageSubresourceRange colorRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
 
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			AllocatedImage allocImg = _rtImages[i];
+			AllocatedImage& allocImg = frameData[i].rtImage;
 			vkCmdClearColorImage(cmd, allocImg.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1, &colorRange);
 		}
 
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			AllocatedImage allocImg = _rtImages[i];
+			AllocatedImage& allocImg = frameData[i].rtImage;
 			utils::transition_image_layout(cmd, allocImg.image, allocImg.format,
 				VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,VK_IMAGE_LAYOUT_GENERAL,
 				VK_IMAGE_ASPECT_COLOR_BIT);
@@ -311,20 +312,21 @@ void RayTracer::init_compute_images() {
 	// Create image views
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
 		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		imgView.image = _rtImages[i].image;
+		imgView.image = frameData[i].rtImage.image;
 		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		imgView.format = VK_FORMAT_R16G16B16A16_UNORM;
 		imgView.components = { VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A }; // rgba
 		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_COLOR_BIT);
 
-		if (vkCreateImageView(_device, &imgView, nullptr, &_rtImages[i].imageView) != VK_SUCCESS)
+		if (vkCreateImageView(_device, &imgView, nullptr, &frameData[i].rtImage.imageView) != VK_SUCCESS)
 			throw std::runtime_error("failed to create image view!");
 	}
 
 	deletionQueue.push([&]() {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			vmaDestroyImage(allocator, _rtImages[i].image, _rtImages[i].alloc);
-			vkDestroyImageView(_device, _rtImages[i].imageView, nullptr);
+			AllocatedImage& img = frameData[i].rtImage;
+			vmaDestroyImage(allocator, img.image, img.alloc);
+			vkDestroyImageView(_device, img.imageView, nullptr);
 		}
 	});
 }
@@ -344,13 +346,13 @@ void RayTracer::init_gfx_pipeline() {
 	pcRange.offset = 0;
 	pcRange.size = sizeof(GFXPushConstants);
 
-	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout, _perMeshGFXLayout };
+	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout };
 
 	VkPipelineLayoutCreateInfo layoutCreateInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
 	layoutCreateInfo.setLayoutCount = 0;
 	layoutCreateInfo.pushConstantRangeCount = 1;
 	layoutCreateInfo.pPushConstantRanges = &pcRange;
-	layoutCreateInfo.setLayoutCount = 2;
+	layoutCreateInfo.setLayoutCount = std::size(layouts);
 	layoutCreateInfo.pSetLayouts = layouts;
 	
 	
@@ -385,7 +387,7 @@ void RayTracer::init_gfx_pipeline() {
 
 	VkPipelineRasterizationStateCreateInfo rasterizer{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
 	rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
-	rasterizer.cullMode = VK_CULL_MODE_BACK_BIT;
+	rasterizer.cullMode = VK_CULL_MODE_NONE;
 	rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
 	rasterizer.lineWidth = 1.0f;
 
@@ -422,9 +424,9 @@ void RayTracer::init_gfx_pipeline() {
 
 	VkPipelineRenderingCreateInfo pipelineRenderingInfo{ .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
 	pipelineRenderingInfo.colorAttachmentCount = 1;
-	pipelineRenderingInfo.pColorAttachmentFormats = &_drawImages[0].format;
-	pipelineRenderingInfo.depthAttachmentFormat = _depthImages[0].format;
-	
+	pipelineRenderingInfo.pColorAttachmentFormats = &frameData[0].drawImage.format;
+	pipelineRenderingInfo.depthAttachmentFormat = frameData[0].depthImage.format;
+
 	VkGraphicsPipelineCreateInfo gfxPipeline{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 	gfxPipeline.pNext = &pipelineRenderingInfo;
 	gfxPipeline.stageCount = 2;
@@ -551,15 +553,20 @@ void RayTracer::init_commands() {
 		throw std::runtime_error("failed to create command pool!");
 	}
 
-	_commandBuffers.resize(FRAMES_IN_FLIGHT);
 
 	VkCommandBufferAllocateInfo allocInfo{.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
 	allocInfo.commandPool = _commandPool;
 	allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
 	allocInfo.commandBufferCount = FRAMES_IN_FLIGHT;
 
-	if (vkAllocateCommandBuffers(_device, &allocInfo, _commandBuffers.data()) != VK_SUCCESS) {
+	std::vector<VkCommandBuffer> buffers(FRAMES_IN_FLIGHT);
+
+	if (vkAllocateCommandBuffers(_device, &allocInfo, buffers.data()) != VK_SUCCESS) {
 		throw std::runtime_error("failed to allocate command buffers!");
+	}
+
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		frameData[i].cmd = buffers[i];
 	}
 
 
@@ -583,13 +590,13 @@ void RayTracer::init_sync_structures() {
 	VkFenceCreateInfo fenceCreateInfo{ .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
 	fenceCreateInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
 
-	_renderFinishedFences.resize(FRAMES_IN_FLIGHT);
-	_imageAvailableSemaphores.resize(FRAMES_IN_FLIGHT);
+
 	_renderFinishedSemaphores.resize(_swapchainImages.size());
 
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		vkCreateFence(_device, &fenceCreateInfo, nullptr, &_renderFinishedFences[i]);
-		vkCreateSemaphore(_device, &semCreateInfo, nullptr, &_imageAvailableSemaphores[i]);
+		FrameData& frame = frameData[i];
+		vkCreateFence(_device, &fenceCreateInfo, nullptr, &frame.renderFinishedFence);
+		vkCreateSemaphore(_device, &semCreateInfo, nullptr, &frame.imageAvailableSemaphore);
 	}
 
 	for (int i = 0; i < _swapchainImages.size(); i++) {
@@ -598,8 +605,9 @@ void RayTracer::init_sync_structures() {
 
 	deletionQueue.push([&]() {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			vkDestroyFence(_device, _renderFinishedFences[i], nullptr);
-			vkDestroySemaphore(_device, _imageAvailableSemaphores[i], nullptr);
+			FrameData& frame = frameData[i];
+			vkDestroyFence(_device, frame.renderFinishedFence, nullptr);
+			vkDestroySemaphore(_device, frame.imageAvailableSemaphore, nullptr);
 		}
 		for (int i = 0; i < _swapchainImages.size(); i++) {
 			vkDestroySemaphore(_device, _renderFinishedSemaphores[i], nullptr);
@@ -653,53 +661,193 @@ void RayTracer::clear_screen(VkCommandBuffer cmd, AllocatedImage img, VkImageLay
 		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
-void RayTracer::draw_imgui(VkCommandBuffer cmd, AllocatedImage img, VkImageLayout imgLayout,
-	VkImageLayout resultLayout) {
+template <typename T>
+void RayTracer::draw_object_menus(const char* tabName, std::vector<T>& objects, T*& selectedItem) {
+
+	ImGui::BeginChild(
+		tabName,
+		ImVec2(0, 0),
+		ImGuiChildFlags_Borders
+	);
+
+	// Left panel
+	ImGui::BeginChild(
+		"List",
+		ImVec2(200, 0),
+		ImGuiChildFlags_Borders
+	);
+
+	if (ImGui::BeginListBox(
+		"##ClassList",
+		ImVec2(-FLT_MIN, -FLT_MIN)
+	))
+	{
+		for (size_t n = 0; n < objects.size(); n++)
+		{
+			T* object = &objects[n];
+
+			bool selected = (selectedItem == object);
+
+			if (ImGui::Selectable(
+				object->name.c_str(),
+				selected
+			))
+			{
+				selectedItem = object;
+			}
+
+			if (selected)
+				ImGui::SetItemDefaultFocus();
+		}
+
+		ImGui::EndListBox();
+	}
+
+	ImGui::EndChild();
+
+	ImGui::SameLine();
+
+	// Right panel
+	ImGui::BeginChild(
+		"MenuOptions",
+		ImVec2(0, 0),
+		ImGuiChildFlags_Borders
+	);
+
+	if (selectedItem)
+		selectedItem->DrawMenu();
+	else
+		ImGui::TextDisabled(
+			"Please select an item from the list."
+		);
+
+	ImGui::EndChild();
+
+	ImGui::EndChild();
+}
+
+void RayTracer::draw_imgui(
+	VkCommandBuffer cmd,
+	AllocatedImage img,
+	VkImageLayout imgLayout,
+	VkImageLayout resultLayout)
+{
 	ImGui_ImplVulkan_NewFrame();
 	ImGui_ImplSDL3_NewFrame();
 	ImGui::NewFrame();
+
 	static bool open = true;
 
-	ImGui::Begin("Suzanne Info", &open, ImGuiWindowFlags_AlwaysAutoResize);
+	static MeshObject* selectedMeshObject = nullptr;
+	static LightObject* selectedLight = nullptr;
+	static CameraObject* selectedCamera = nullptr;
+	static Material* selectedMaterial = nullptr;
 
+	ImGui::SetNextWindowSize(
+		ImVec2(600, 400),
+		ImGuiCond_FirstUseEver
+	);
 
+	if (ImGui::Begin("Scene Info", &open))
+	{
+		if (ImGui::BeginTabBar("SceneTabs"))
+		{
+			// -------------------------
+			// Objects
+			// -------------------------
+			if (ImGui::BeginTabItem("Objects"))
+			{
+				draw_object_menus(
+					"Scene Objects",
+					scene.objects,
+					selectedMeshObject
+				);
+
+				ImGui::EndTabItem();
+			}
+
+			// -------------------------
+			// Lights
+			// -------------------------
+			if (ImGui::BeginTabItem("Lights"))
+			{
+				draw_object_menus(
+					"Scene Lights",
+					scene.lights,
+					selectedLight
+				);
+
+				ImGui::EndTabItem();
+			}
+
+			if (ImGui::BeginTabItem("Camera"))
+			{
+				CameraObject& camera = scene.camera;
+
+				camera.DrawMenu();
+
+				ImGui::EndTabItem();
+			}
+
+			if (ImGui::BeginTabItem("Materials"))
+			{
+				draw_object_menus("Materials", scene.materials, selectedMaterial);
+
+				ImGui::EndTabItem();
+			}
+
+			ImGui::EndTabBar();
+		}
+	}
 
 	ImGui::End();
-	ImGui::Render();
 
+	ImGui::Render();
 
 	ImDrawData* draw_data = ImGui::GetDrawData();
 
 	VkRect2D renderArea;
 	renderArea.extent = _swapchainExtent;
-	renderArea.offset = { 0,0 };
+	renderArea.offset = { 0, 0 };
 
-	VkRenderingAttachmentInfo colorAttachment{.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+	VkRenderingAttachmentInfo colorAttachment{
+		.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO
+	};
+
 	colorAttachment.imageView = img.imageView;
 	colorAttachment.imageLayout = imgLayout;
 	colorAttachment.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	colorAttachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
+	VkRenderingInfo renderingInfo{
+		.sType = VK_STRUCTURE_TYPE_RENDERING_INFO
+	};
 
-	VkRenderingInfo renderingInfo{.sType = VK_STRUCTURE_TYPE_RENDERING_INFO};
 	renderingInfo.renderArea = renderArea;
 	renderingInfo.layerCount = 1;
 	renderingInfo.viewMask = 0;
 	renderingInfo.colorAttachmentCount = 1;
 	renderingInfo.pColorAttachments = &colorAttachment;
-	
+
 	vkCmdBeginRendering(cmd, &renderingInfo);
 
 	ImGui_ImplVulkan_RenderDrawData(draw_data, cmd);
 
 	vkCmdEndRendering(cmd);
 
-	utils::transition_image_layout(cmd, img.image, img.format, imgLayout,
-		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
-		VK_PIPELINE_STAGE_2_CLEAR_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
-		VK_ACCESS_2_TRANSFER_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+	utils::transition_image_layout(
+		cmd,
+		img.image,
+		img.format,
+		imgLayout,
+		resultLayout,
+		VK_IMAGE_ASPECT_COLOR_BIT,
+		VK_PIPELINE_STAGE_2_CLEAR_BIT,
+		VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
+		VK_ACCESS_2_TRANSFER_WRITE_BIT,
+		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT
+	);
 }
-
 void RayTracer::present_swapchain_image(uint32_t idx) {
 	VkPresentInfoKHR presentInfo{ .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
 	presentInfo.waitSemaphoreCount = 1;
@@ -712,23 +860,28 @@ void RayTracer::present_swapchain_image(uint32_t idx) {
 }
 
 void RayTracer::draw() {
+
 	int idx = _currentFrame % FRAMES_IN_FLIGHT;
-	vkWaitForFences(_device, 1, &_renderFinishedFences[idx], VK_TRUE, UINT64_MAX);
-	vkResetFences(_device, 1, &_renderFinishedFences[idx]);
+	FrameData& frame = frameData[idx];
+
+	vkWaitForFences(_device, 1, &frame.renderFinishedFence, VK_TRUE, UINT64_MAX);
+	vkResetFences(_device, 1, &frame.renderFinishedFence);
 
 
 	uint32_t img_index;
 	vkAcquireNextImageKHR(_device, _swapchain, UINT64_MAX,
-		_imageAvailableSemaphores[_currentFrame % FRAMES_IN_FLIGHT], VK_NULL_HANDLE,
+		frame.imageAvailableSemaphore, VK_NULL_HANDLE,
 		&img_index);
 
-	AllocatedImage drawImage = _drawImages[idx];
-	AllocatedImage depthImage = _depthImages[idx];
+	VkImage& swapImage = _swapchainImages[img_index];
+	VkImageView& swapImageView = _swapchainImageViews[img_index];
 
-	VkImage swapImage = _swapchainImages[img_index];
-	VkImageView swapImageView = _swapchainImageViews[img_index];
 
-	VkCommandBuffer cmd = _commandBuffers[idx];
+	AllocatedImage& drawImage = frame.drawImage;
+	AllocatedImage& depthImage = frame.depthImage;
+
+
+	VkCommandBuffer& cmd = frame.cmd;
 
 	vkResetCommandBuffer(cmd, 0);
 
@@ -741,9 +894,9 @@ void RayTracer::draw() {
 	
 	utils::transition_image_layout(cmd, depthImage.image, depthImage.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	//draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-	//draw_gfx(cmd, drawImage, depthImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	draw_gfx(cmd, frame, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	draw_imgui(cmd, drawImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -757,7 +910,7 @@ void RayTracer::draw() {
 	utils::transition_image_layout(cmd, swapImage, _swapchainFormat, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_ASPECT_COLOR_BIT);
 	vkEndCommandBuffer(cmd);
 
-	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(_imageAvailableSemaphores[idx], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
+	VkSemaphoreSubmitInfo imgAvailableSemSubmit = vkinit::semaphoreSubmitInfo(frame.imageAvailableSemaphore, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
 
 	VkSemaphoreSubmitInfo renderFinishedSemSubmit = vkinit::semaphoreSubmitInfo(_renderFinishedSemaphores[img_index], VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT);
 
@@ -775,17 +928,86 @@ void RayTracer::draw() {
 	submitInfo.pCommandBufferInfos = &cmdSubmit;
 	
 
-	vkQueueSubmit2(_graphicsQueue, 1, &submitInfo, _renderFinishedFences[idx]);
+	vkQueueSubmit2(_graphicsQueue, 1, &submitInfo, frame.renderFinishedFence);
 
 	present_swapchain_image(img_index);
 	_currentFrame++;
 }
 
-void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage depthImage, VkImageLayout imgLayout, VkImageLayout resultLayout) {
-	VkRect2D area{ .offset = {0,0}, .extent = img.extent };
+void RayTracer::update_scene_buffers(FrameData& frame) {
+	//for (size_t i = 0; i < scene.objects.size(); ++i) {
+	//	const auto& object = scene.objects[i];
+
+	//	glm::mat4 model = object.getTransform();
+
+	//	std::cout << "OBJECT " << i << "\n";
+	//	std::cout << glm::to_string(model) << "\n";
+	//}
+
+	std::vector<MeshUBO> data;
+	data.reserve(scene.objects.size());
+	for (const auto& object : scene.objects) {
+
+		MeshUBO ubo{};
+		ubo.model = object.getTransform();
+		ubo.objectToWorldDir = glm::inverse(glm::transpose(ubo.model));
+
+		data.push_back(ubo);
+	}
+
+	AllocatedBuffer& objBuffer = frame.objectBuffer;
+	void* ObjAddr = objBuffer.allocInfo.pMappedData;
+
+	memcpy(ObjAddr, data.data(), scene.objects.size() * sizeof(MeshUBO));
+
+	ViewUBO viewData{};
+	float aspect = (float)_swapchainExtent.width / _swapchainExtent.height;
+
+	auto [view, projection] = scene.camera.getViewMatrices(aspect);
+	projection[1][1] *= -1;		// Account for vulkan flipped y
+
+	viewData.view = view;
+	viewData.proj = projection;
+
+	std::vector<DirectionalLight> directionalLights;
+	for (const auto& light : scene.lights) {
+		DirectionalLight l;
+		l.color = light.color;
+		l.intensity = light.intensity;
+		
+		glm::quat quat(glm::radians(light.rotation));
+		auto rotation = glm::mat4_cast(quat);
+
+		l.direction = rotation * glm::vec4(0, 0, -1, 0);
+		directionalLights.push_back(l);
+	}
+
+	viewData.lightCount = std::min((uint32_t)MAX_DIRECTIONAL_LIGHTS, (uint32_t)scene.lights.size());
+	memcpy(viewData.lights, directionalLights.data(), viewData.lightCount * sizeof(DirectionalLight));
+
+	AllocatedBuffer& viewBuffer = frame.viewUBO;
+	void* viewAddr = viewBuffer.allocInfo.pMappedData;
+
+	memcpy(viewAddr, &viewData, sizeof(ViewUBO));
+
+	AllocatedBuffer& matBuffer = frame.materialBuffer;
+
+	void* matAddr = matBuffer.allocInfo.pMappedData;
+	std::vector<MaterialGPU> materialData;
+	for (const auto& mat : scene.materials) materialData.push_back(mat.data);
+	memcpy(matAddr, materialData.data(), sizeof(MaterialGPU) * scene.materials.size());
+}
+
+void RayTracer::draw_gfx(VkCommandBuffer cmd, FrameData& frame, VkImageLayout imgLayout, VkImageLayout resultLayout) {
+	update_scene_buffers(frame);
+
+	AllocatedImage& drawImage = frame.drawImage;
+	AllocatedImage& depthImage = frame.depthImage;
+
+	VkRect2D area{ .offset = {0,0}, .extent = drawImage.extent };
 
 	VkRenderingAttachmentInfo attachInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
-	attachInfo.imageView = img.imageView;
+	attachInfo.imageView = drawImage.imageView;
 	attachInfo.imageLayout = imgLayout;
 	attachInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
 	attachInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -793,7 +1015,8 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage
 	VkRenderingAttachmentInfo depthInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO };
 	depthInfo.imageView = depthImage.imageView;
 	depthInfo.imageLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-	depthInfo.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
+	depthInfo.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+	depthInfo.clearValue = { 0.0f, 0 };
 	depthInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
 
 	VkRenderingInfo rendInfo{ .sType = VK_STRUCTURE_TYPE_RENDERING_INFO };
@@ -803,37 +1026,7 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage
 	rendInfo.pColorAttachments = &attachInfo;
 	rendInfo.pDepthAttachment = &depthInfo;
 
-	ViewUBO view{};
-	view.view = glm::translate(glm::mat4{ 1 }, _monkeyPos);
-	view.proj = glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f);
-	view.proj[1][1] *= -1; // account for vulkan flipped y-direction
 
-	MeshUBO mesh{};
-
-
-	glm::quat rotationQuat(_monkeyAngles);
-	glm::mat4 rot = glm::mat4_cast(rotationQuat);
-	
-	glm::mat4 model = glm::scale( rot, _monkeyScale );
-
-	mesh.model = model;
-
-	memcpy(viewUBO.allocInfo.pMappedData, &view, sizeof(view));
-	memcpy(meshUBO.allocInfo.pMappedData, &mesh, sizeof(mesh));
-	
-	vkCmdBeginRendering(cmd, &rendInfo);
-
-	VkDescriptorSet sets[] { _perFrameGFXDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT], _perMeshGFXDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT]};
-
-	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipelineLayout,
-		0, 2, sets, 0, nullptr);
-
-	GFXPushConstants pc{ .vertAddress = vertAddress };
-	
-	vkCmdBindIndexBuffer(cmd, selectedMesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
-	vkCmdPushConstants(cmd, _gfxPipelineLayout, VK_SHADER_STAGE_ALL, 0, 8, &pc);
-
-	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipeline);
 	VkViewport viewport{};
 	viewport.x = 0;
 	viewport.y = 0;
@@ -846,21 +1039,50 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, AllocatedImage img, AllocatedImage
 	scissor.extent = _swapchainExtent;
 	scissor.offset = { 0,0 };
 
+
+	vkCmdBeginRendering(cmd, &rendInfo);
+	vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipeline);
+
 	vkCmdSetViewport(cmd, 0, 1, &viewport);
 	vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-	
+	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, _gfxPipelineLayout,
+		0, 1, &frame.viewDescriptorSet, 0, nullptr);
 
-	for (auto primitive : selectedMesh.primitives) {
-		auto firstIndex = primitive.firstIndex;
-		auto count = primitive.count;
-		auto offset = primitive.vertexOffset;
-		vkCmdDrawIndexed(cmd, count, 1, firstIndex, offset, 0);
+
+	VkDeviceAddress materialBDA = frame.materialBuffer.bufferAddress.value();
+	VkDeviceAddress objectBDA = frame.objectBuffer.bufferAddress.value();
+
+	GFXPushConstants pc;
+	pc.materialAddress = materialBDA;
+	pc.meshAddress = objectBDA;
+
+	uint32_t meshIndex{ 0 };
+	
+	for (const auto& object : scene.objects) {
+		pc.meshIndex = meshIndex;
+
+		const AllocatedMesh& mesh = object.mesh.value();
+		pc.vertAddress = mesh.vertexBuffer.bufferAddress.value();
+
+		vkCmdBindIndexBuffer(cmd, mesh.indexBuffer.buffer, 0, VK_INDEX_TYPE_UINT32);
+
+
+		for (const auto& primitive : mesh.primitives) {
+			auto firstIndex = primitive.firstIndex;
+			auto count = primitive.count;
+			auto offset = primitive.vertexOffset;
+			pc.materialIndex = primitive.materialIndex;
+			
+			vkCmdPushConstants(cmd, _gfxPipelineLayout, VK_SHADER_STAGE_ALL, 0, sizeof(GFXPushConstants), &pc);
+			vkCmdDrawIndexed(cmd, count, 1, firstIndex, offset, 0);
+		}
+		meshIndex++;
 	}
 
 	vkCmdEndRendering(cmd);
 
-	utils::transition_image_layout(cmd, img.image, img.format, imgLayout,
+	utils::transition_image_layout(cmd, drawImage.image, drawImage.format, imgLayout,
 		resultLayout, VK_IMAGE_ASPECT_COLOR_BIT,
 		VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT,
 		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
@@ -956,22 +1178,31 @@ void RayTracer::create_rt_descriptors() {
 
 	VkDescriptorSetLayout layouts[]{ _rtDescriptorLayout, _rtDescriptorLayout };
 
-	_rtDescriptorSets.resize(FRAMES_IN_FLIGHT);
+	std::vector<VkDescriptorSet> sets;
+	sets.reserve(FRAMES_IN_FLIGHT);
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) sets.push_back(frameData[i].rtDescriptorSet);
 
 	VkDescriptorSetAllocateInfo allocInfo{ VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO };
 	allocInfo.descriptorPool = _descriptorPool;
 	allocInfo.descriptorSetCount = FRAMES_IN_FLIGHT;
 	allocInfo.pSetLayouts = layouts;
 
-	if(vkAllocateDescriptorSets(_device, &allocInfo, _rtDescriptorSets.data()) != VK_SUCCESS)
+	if(vkAllocateDescriptorSets(_device, &allocInfo, sets.data()) != VK_SUCCESS)
 		throw std::runtime_error("failed to allocate descriptor sets for compute shader");
 
-	// Now write the descriptors
+	for (int i = 0; i < FRAMES_IN_FLIGHT; i++)
+		frameData[i].rtDescriptorSet = sets[i];
 
+
+	std::vector<VkWriteDescriptorSet> set;
 
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		AllocatedImage drawImage = _rtImages[i];
-		AllocatedImage historyImage = (i == 0) ? _rtImages[FRAMES_IN_FLIGHT-1] : _rtImages[i - 1];
+
+		FrameData& frame = frameData[i];
+		FrameData& previousFrame = (i == 0) ? frameData[FRAMES_IN_FLIGHT - 1] : frameData[i - 1];
+
+		AllocatedImage& drawImage = frame.rtImage;
+		AllocatedImage& historyImage = previousFrame.rtImage;
 
 		VkDescriptorImageInfo drawImageInfo{};
 		drawImageInfo.imageView = drawImage.imageView;
@@ -984,15 +1215,15 @@ void RayTracer::create_rt_descriptors() {
 
 		VkDescriptorImageInfo imageWrites[2]{ drawImageInfo, historyImageInfo };
 
-		VkWriteDescriptorSet imageWrite{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-		imageWrite.dstSet = _rtDescriptorSets[i];
+		VkWriteDescriptorSet imageWrite{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+		imageWrite.dstSet = frameData[i].rtDescriptorSet;
 		imageWrite.dstBinding = 0;
 		imageWrite.dstArrayElement = 0;
 		imageWrite.descriptorCount = 2;
 		imageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		imageWrite.pImageInfo = imageWrites;
 
-		AllocatedBuffer ubo = computeUBO;
+		AllocatedBuffer ubo = computeUBO; // THIS NEEDS TO BE UPDATED TO PERFRAME
 
 		VkDescriptorBufferInfo bufferInfo{};
 		bufferInfo.buffer = ubo.buffer;
@@ -1000,7 +1231,7 @@ void RayTracer::create_rt_descriptors() {
 		bufferInfo.range = sizeof(ComputeUBO);
 
 		VkWriteDescriptorSet uboWrite{ VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-		uboWrite.dstSet = _rtDescriptorSets[i];
+		uboWrite.dstSet = frameData[i].rtDescriptorSet;
 		uboWrite.dstBinding = 1;
 		uboWrite.dstArrayElement = 0;
 		uboWrite.descriptorCount = 1;
@@ -1020,7 +1251,7 @@ void RayTracer::create_gfx_descriptors() {
 	perFrameUniformBinding.binding = 0;
 	perFrameUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 	perFrameUniformBinding.descriptorCount = 1;
-	perFrameUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+	perFrameUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
 
 	VkDescriptorSetLayoutCreateInfo perFrameDescInfo {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
 	perFrameDescInfo.bindingCount = 1;
@@ -1029,83 +1260,50 @@ void RayTracer::create_gfx_descriptors() {
 	if (vkCreateDescriptorSetLayout(_device, &perFrameDescInfo, nullptr, &_perFrameGFXLayout) != VK_SUCCESS)
 		throw std::runtime_error("failed to create descriptor set layout for per-frame graphics data");
 
-	VkDescriptorSetLayoutBinding perMeshUniformBinding{}; // Just the model matrix for now, later on could be material data
-	perMeshUniformBinding.binding = 0;
-	perMeshUniformBinding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-	perMeshUniformBinding.descriptorCount = 1;
-	perMeshUniformBinding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
 
-	VkDescriptorSetLayoutCreateInfo perMeshDescInfo { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO };
-	perMeshDescInfo.bindingCount = 1;
-	perMeshDescInfo.pBindings = &perMeshUniformBinding;
-
-	if (vkCreateDescriptorSetLayout(_device, &perMeshDescInfo, nullptr, &_perMeshGFXLayout) != VK_SUCCESS)
-		throw std::runtime_error("failed to create descriptor set layout for per-frame graphics data");
-	
-
-
-	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout, _perFrameGFXLayout, _perMeshGFXLayout, _perMeshGFXLayout};
+	VkDescriptorSetLayout layouts[]{ _perFrameGFXLayout, _perFrameGFXLayout };
 
 	VkDescriptorSetAllocateInfo allocInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
 	allocInfo.descriptorPool = _descriptorPool;
-	allocInfo.descriptorSetCount = 4;
+	allocInfo.descriptorSetCount = std::size(layouts);
 	allocInfo.pSetLayouts = layouts;
 
-	_perFrameGFXDescriptorSets.resize(FRAMES_IN_FLIGHT);
-	_perMeshGFXDescriptorSets.resize(FRAMES_IN_FLIGHT);
+	std::vector<VkDescriptorSet> sets;
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) sets.push_back(frameData[i].viewDescriptorSet);
 
-	VkDescriptorSet sets[]{ _perFrameGFXDescriptorSets[0], _perFrameGFXDescriptorSets[1], _perMeshGFXDescriptorSets[0], _perMeshGFXDescriptorSets[1]};
-
-	if (vkAllocateDescriptorSets(_device, &allocInfo, sets) != VK_SUCCESS)
+	if (vkAllocateDescriptorSets(_device, &allocInfo, sets.data()) != VK_SUCCESS)
 		throw std::runtime_error("failed to allocate descriptor sets!");
 
-	_perFrameGFXDescriptorSets[0] = sets[0];
-	_perFrameGFXDescriptorSets[1] = sets[1];
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) frameData[i].viewDescriptorSet = sets[i];
 
-	_perMeshGFXDescriptorSets[0] = sets[2];
-	_perMeshGFXDescriptorSets[1] = sets[3];
+	std::vector<VkWriteDescriptorSet> writes;
+	writes.reserve(FRAMES_IN_FLIGHT);
 
-	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		FrameData& frame = frameData[i];
+
 		VkDescriptorBufferInfo vBufferInfo{};
-		vBufferInfo.buffer = viewUBO.buffer;
+		vBufferInfo.buffer = frame.viewUBO.buffer;
 		vBufferInfo.offset = 0;
 		vBufferInfo.range = sizeof(ViewUBO);
-
-		VkDescriptorBufferInfo mBufferInfo{};
-		mBufferInfo.buffer = meshUBO.buffer;
-		mBufferInfo.offset = 0;
-		mBufferInfo.range = sizeof(MeshUBO);
 
 		VkWriteDescriptorSet viewWrite{
 			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
 		};
-		viewWrite.dstSet = _perFrameGFXDescriptorSets[i];
+		viewWrite.dstSet = frameData[i].viewDescriptorSet;
 		viewWrite.dstBinding = 0;
 		viewWrite.descriptorCount = 1;
 		viewWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
 		viewWrite.pBufferInfo = &vBufferInfo;
 
-		VkWriteDescriptorSet meshWrite{
-			VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET
-		};
-		meshWrite.dstSet = _perMeshGFXDescriptorSets[i];
-		meshWrite.dstBinding = 0;
-		meshWrite.descriptorCount = 1;
-		meshWrite.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-		meshWrite.pBufferInfo = &mBufferInfo;
+		writes.push_back(viewWrite);
 
-		VkWriteDescriptorSet writes[] = {
-			viewWrite,
-			meshWrite
-		};
-
-		vkUpdateDescriptorSets(_device, 2, writes, 0, nullptr);
 	}
+	vkUpdateDescriptorSets(_device, writes.size(), writes.data(), 0, nullptr);
 
 	deletionQueue.push([&]() {
 		vkDestroyDescriptorSetLayout(_device, _perFrameGFXLayout, nullptr);
-		vkDestroyDescriptorSetLayout(_device, _perMeshGFXLayout, nullptr);
-		});
+	});
 
 
 }
@@ -1143,7 +1341,7 @@ void RayTracer::init_imgui() {
 
 	VkPipelineRenderingCreateInfo pipelineRenderingInfo{.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};
 	pipelineRenderingInfo.colorAttachmentCount = 1;
-	pipelineRenderingInfo.pColorAttachmentFormats = &_drawImages[0].format;
+	pipelineRenderingInfo.pColorAttachmentFormats = &frameData[0].drawImage.format;
 	pipelineRenderingInfo.viewMask = 0;	// No multiview
 
 
@@ -1188,7 +1386,87 @@ void RayTracer::init_vma() {
 }
 
 void RayTracer::load_scene() {
-	load_meshes();
+	loaders::load_scene("C:/Users/adamm/GitRepos/VulkanRayTracer/assets/Test/TestScene.gltf", this, scene);
+	
+	for (size_t i = 0; i < scene.objects.size(); ++i) {
+		const auto& obj = scene.objects[i];
+		const auto& mesh = obj.mesh.value();
+
+		std::cout
+			<< "Object " << i
+			<< " name=" << obj.name
+			<< " meshVB=" << mesh.vertexBuffer.buffer
+			<< " meshIB=" << mesh.indexBuffer.buffer
+			<< " primitives=" << mesh.primitives.size()
+			<< '\n';
+
+		for (size_t p = 0; p < mesh.primitives.size(); ++p) {
+			const auto& prim = mesh.primitives[p];
+
+			std::cout
+				<< "  primitive " << p
+				<< " firstIndex=" << prim.firstIndex
+				<< " count=" << prim.count
+				<< " vertexOffset=" << prim.vertexOffset
+				<< " material=" << prim.materialIndex
+				<< '\n';
+		}
+	}
+
+	VkBufferCreateInfo materialBufferCreate{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+	materialBufferCreate.size = sizeof(MaterialGPU) * scene.materials.size();
+	materialBufferCreate.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	materialBufferCreate.queueFamilyIndexCount = 1;
+	materialBufferCreate.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+	VmaAllocationCreateInfo materialAllocCreate{};
+	materialAllocCreate.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	materialAllocCreate.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	materialAllocCreate.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedBuffer& buff = frameData[i].materialBuffer;
+		if (vmaCreateBuffer(allocator, &materialBufferCreate, &materialAllocCreate, &buff.buffer,
+			&buff.alloc, &buff.allocInfo) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create material buffer!");
+		}
+		VkBufferDeviceAddressInfo addrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		addrInfo.buffer = buff.buffer;
+
+		buff.bufferAddress = vkGetBufferDeviceAddress(_device, &addrInfo);
+	}
+
+	VkBufferCreateInfo objectBufferCreate{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	objectBufferCreate.size = sizeof(MeshUBO) * scene.objects.size();
+	objectBufferCreate.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	objectBufferCreate.queueFamilyIndexCount = 1;
+	objectBufferCreate.pQueueFamilyIndices = &_graphicsQueueFamily;
+
+	VmaAllocationCreateInfo objectAllocCreate{};
+	objectAllocCreate.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	objectAllocCreate.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	objectAllocCreate.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedBuffer& buffer = frameData[i].objectBuffer;
+		if (vmaCreateBuffer(allocator, &objectBufferCreate, &objectAllocCreate, &buffer.buffer,
+			&buffer.alloc, &buffer.allocInfo) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create object buffer!");
+		}
+		VkBufferDeviceAddressInfo addrInfo { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		addrInfo.buffer = frameData[i].objectBuffer.buffer;
+
+		frameData[i].objectBuffer.bufferAddress = vkGetBufferDeviceAddress(_device, &addrInfo);
+	}
+	deletionQueue.push([&]() {
+		for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedBuffer& obj = frameData[i].objectBuffer;
+			AllocatedBuffer& mat = frameData[i].materialBuffer;
+
+			vmaDestroyBuffer(allocator, obj.buffer, obj.alloc);
+			vmaDestroyBuffer(allocator, mat.buffer, mat.alloc);
+		}
+		});
 }
 
 void RayTracer::load_meshes() {
@@ -1220,32 +1498,19 @@ void RayTracer::create_uniform_buffers(){
 	viewBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
 	viewBufferAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-	if (vmaCreateBuffer(allocator, &viewBufferInfo, &viewBufferAllocInfo, &viewUBO.buffer, &viewUBO.alloc, &viewUBO.allocInfo)
-		!= VK_SUCCESS) {
-		throw std::runtime_error("failed to create view UBO!");
-	}
-
-
-	// Mesh Buffer
-	VkBufferCreateInfo meshBufferInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-	meshBufferInfo.size = sizeof(MeshUBO);
-	meshBufferInfo.usage = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-	meshBufferInfo.queueFamilyIndexCount = 1;
-	meshBufferInfo.pQueueFamilyIndices = &_graphicsQueueFamily;
-
-	VmaAllocationCreateInfo meshBufferAllocInfo{};
-	meshBufferAllocInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT;
-	meshBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
-
-	if (vmaCreateBuffer(allocator, &meshBufferInfo, &meshBufferAllocInfo, &meshUBO.buffer, &meshUBO.alloc, &meshUBO.allocInfo)
-		!= VK_SUCCESS) {
-		throw std::runtime_error("failed to create mesh UBO!");
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedBuffer& ubo = frameData[i].viewUBO;
+		if (vmaCreateBuffer(allocator, &viewBufferInfo, &viewBufferAllocInfo, &ubo.buffer, &ubo.alloc, &ubo.allocInfo)
+			!= VK_SUCCESS) {
+			throw std::runtime_error("failed to create view UBO!");
+		}
 	}
 
 	deletionQueue.push([&]() {
-		vmaDestroyBuffer(allocator, viewUBO.buffer, viewUBO.alloc);
-		vmaDestroyBuffer(allocator, meshUBO.buffer, meshUBO.alloc);
-
+		for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedBuffer& ubo = frameData[i].viewUBO;
+			vmaDestroyBuffer(allocator, ubo.buffer, ubo.alloc);
+		}
 		});
 }
 
@@ -1275,7 +1540,7 @@ void RayTracer::init_depth_images() {
 	VkImageCreateInfo imgCreate{ VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
 	imgCreate.imageType = VK_IMAGE_TYPE_2D;
 	imgCreate.format = VK_FORMAT_D32_SFLOAT;
-	imgCreate.extent = { _drawImages[0].extent.width, _drawImages[0].extent.height, 1};
+	imgCreate.extent = { _swapchainExtent.width, _swapchainExtent.height, 1};
 	imgCreate.mipLevels = 1;
 	imgCreate.arrayLayers = 1;
 	imgCreate.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1289,12 +1554,13 @@ void RayTracer::init_depth_images() {
 	allocCreate.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 	allocCreate.preferredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
-	_depthImages.resize(FRAMES_IN_FLIGHT);
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-		_depthImages[i].extent = _swapchainExtent;
-		_depthImages[i].format = VK_FORMAT_D32_SFLOAT;
 
-		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &_depthImages[i].image, &_depthImages[i].alloc, nullptr) != VK_SUCCESS)
+		AllocatedImage& img = frameData[i].depthImage;
+		img.extent = _swapchainExtent;
+		img.format = VK_FORMAT_D32_SFLOAT;
+
+		if (vmaCreateImage(allocator, &imgCreate, &allocCreate, &img.image, &img.alloc, nullptr) != VK_SUCCESS)
 			throw std::runtime_error("failed to create depth image!");
 	}
 
@@ -1302,20 +1568,23 @@ void RayTracer::init_depth_images() {
 
 
 	for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedImage& img = frameData[i].depthImage;
+
 		VkImageViewCreateInfo imgView{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
-		imgView.image = _depthImages[i].image;
+		imgView.image = img.image;
 		imgView.viewType = VK_IMAGE_VIEW_TYPE_2D;
 		imgView.format = VK_FORMAT_D32_SFLOAT;
 		imgView.subresourceRange = vkinit::imageSubResourceRange(VK_IMAGE_ASPECT_DEPTH_BIT);
 
-		if (vkCreateImageView(_device, &imgView, nullptr, &_depthImages[i].imageView) != VK_SUCCESS)
+		if (vkCreateImageView(_device, &imgView, nullptr, &img.imageView) != VK_SUCCESS)
 			throw std::runtime_error("failed to create image view!");
 	}
 
 	deletionQueue.push([&]() {
 		for (int i = 0; i < FRAMES_IN_FLIGHT; i++) {
-			vmaDestroyImage(allocator, _depthImages[i].image, _depthImages[i].alloc);
-			vkDestroyImageView(_device, _depthImages[i].imageView, nullptr);
+			AllocatedImage& img = frameData[i].depthImage;
+			vmaDestroyImage(allocator, img.image, img.alloc);
+			vkDestroyImageView(_device, img.imageView, nullptr);
 		}
 		});
 }
