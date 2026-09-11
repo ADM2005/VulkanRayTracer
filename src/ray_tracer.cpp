@@ -1088,29 +1088,33 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, FrameData& frame, VkImageLayout im
 		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
+void RayTracer::update_compute_buffers(FrameData& frame) {
+	ComputeUBO ubo{};
+	float aspect = (float)_swapchainExtent.width / _swapchainExtent.height;
+	auto [view, projection] = scene.camera.getViewMatrices(aspect);
+
+	ubo.viewInv = glm::inverse(view);
+	ubo.projInv = glm::inverse(projection);
+	ubo.imageSize = glm::ivec2(_swapchainExtent.width, _swapchainExtent.height);
+
+	void* addr = frame.computeUBO.allocInfo.pMappedData;
+
+	memcpy(addr, &ubo, sizeof(ComputeUBO));
+}
+
 void RayTracer::draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout) {
+	FrameData frame = frameData[_currentFrame % FRAMES_IN_FLIGHT];
+	update_compute_buffers(frame);
 
-	AllocatedImage draw_image = _rtImages[_currentFrame % FRAMES_IN_FLIGHT];
-	AllocatedImage history_image = (_currentFrame % FRAMES_IN_FLIGHT == 0) ? _rtImages[FRAMES_IN_FLIGHT - 1] : _rtImages[_currentFrame % FRAMES_IN_FLIGHT - 1];
+	AllocatedImage draw_image = frame.rtImage;
+	AllocatedImage history_image = frame.historyImage;
 
-	AllocatedImage drawGFXImage = _drawImages[_currentFrame % FRAMES_IN_FLIGHT];
+	AllocatedImage drawGFXImage = frame.drawImage;
 
 	ComputePC pc{};
 	pc.frameNumber = glm::int16((short)_currentFrame);
 
-	ComputeUBO ubo{};
-
-	ubo.viewInv = glm::inverse(glm::translate(glm::mat4{ 1 }, { 0,0,-5 }));
-
-	glm::mat4 proj = glm::perspective(70.0f, (float)_swapchainExtent.width / _swapchainExtent.height, 1000.0f, 0.01f);
-	//proj[1][1] *= -1;
-
-	ubo.projInv = glm::inverse(proj);
-	ubo.imageSize = glm::ivec2(draw_image.extent.width, draw_image.extent.height);
-
-	memcpy(computeUBO.allocInfo.pMappedData, &ubo, sizeof(ubo));
-
-	VkDescriptorSet sets[]{ _rtDescriptorSets[_currentFrame % FRAMES_IN_FLIGHT] };
+	VkDescriptorSet sets[]{ frame.rtDescriptorSet };
 	
 	vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, _computeRTPipelineLayout,
 		0, 1, sets, 0, nullptr);
@@ -1223,7 +1227,7 @@ void RayTracer::create_rt_descriptors() {
 		imageWrite.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
 		imageWrite.pImageInfo = imageWrites;
 
-		AllocatedBuffer ubo = computeUBO; // THIS NEEDS TO BE UPDATED TO PERFRAME
+		AllocatedBuffer ubo = frameData[i].computeUBO; // THIS NEEDS TO BE UPDATED TO PERFRAME
 
 		VkDescriptorBufferInfo bufferInfo{};
 		bufferInfo.buffer = ubo.buffer;
@@ -1385,8 +1389,11 @@ void RayTracer::init_vma() {
 		});
 }
 
+void RayTracer::init_bvh() {
+}
+
 void RayTracer::load_scene() {
-	loaders::load_scene("C:/Users/adamm/GitRepos/VulkanRayTracer/assets/Test/TestScene.gltf", this, scene);
+	loaders::load_scene("C:/Users/adamm/GitRepos/VulkanRayTracer/assets/Interior/Interior.gltf", this, scene);
 	
 	for (size_t i = 0; i < scene.objects.size(); ++i) {
 		const auto& obj = scene.objects[i];
@@ -1527,13 +1534,20 @@ void RayTracer::create_compute_buffers() {
 	compBufferAllocInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
 	compBufferAllocInfo.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
-	if (vmaCreateBuffer(allocator, &compBufferInfo, &compBufferAllocInfo, &computeUBO.buffer, &computeUBO.alloc, &computeUBO.allocInfo)
-		!= VK_SUCCESS) {
-		throw std::runtime_error("failed to create view UBO!");
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedBuffer& ubo = frameData[i].computeUBO;
+		if (vmaCreateBuffer(allocator, &compBufferInfo, &compBufferAllocInfo, &ubo.buffer, &ubo.alloc, &ubo.allocInfo)
+			!= VK_SUCCESS) {
+			throw std::runtime_error("failed to create view UBO!");
+		}
 	}
 
+
 	deletionQueue.push([&]() {
-		vmaDestroyBuffer(allocator, computeUBO.buffer, computeUBO.alloc);
+		for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedBuffer& ubo = frameData[i].computeUBO;
+			vmaDestroyBuffer(allocator, ubo.buffer, ubo.alloc);
+		}
 		});
 }
 void RayTracer::init_depth_images() {
@@ -1587,4 +1601,9 @@ void RayTracer::init_depth_images() {
 			vkDestroyImageView(_device, img.imageView, nullptr);
 		}
 		});
+}
+
+void RayTracer::uploadBLAS(BVHBuildResult& blas) {
+	std::vector<BVHTriRef> triangles = blas.triangles;
+	std::vector<BVHNode> nodes = blas.nodes;
 }

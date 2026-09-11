@@ -9,6 +9,8 @@
 #include <functional>
 #include <stack>
 
+#include "include/bvh.hpp"
+
 VkShaderModule loaders::load_shader(const char* filepath, VkDevice device) {
 
 	std::ifstream file(filepath, std::ifstream::binary);
@@ -110,7 +112,7 @@ AllocatedMesh allocateMesh(const fastgltf::Mesh& mesh, fastgltf::Asset& asset, R
 			});
 
 		primitive.count = globalIndices.size() - primitive.firstIndex;
-
+		
 		allocMesh.primitives.push_back(primitive);
 	}
 
@@ -183,15 +185,22 @@ AllocatedMesh allocateMesh(const fastgltf::Mesh& mesh, fastgltf::Asset& asset, R
 		vkCmdCopyBuffer(cmd, stagingBuffer, allocMesh.indexBuffer.buffer, 1, &idxCopy);
 	});
 
+
 	vmaDestroyBuffer(rt->allocator, stagingBuffer, stagingAllocation);
+
+	BVHBuildResult blas = bvh::buildBLAS(globalVertices, globalIndices, allocMesh.primitives);
+	rt->uploadBLAS(blas);
+
 
 	rt->deletionQueue.push([=]() {
 		vmaDestroyBuffer(rt->allocator, allocMesh.vertexBuffer.buffer, allocMesh.vertexBuffer.alloc);
 		vmaDestroyBuffer(rt->allocator, allocMesh.indexBuffer.buffer, allocMesh.indexBuffer.alloc);
 		});
 
+
 	return allocMesh;
 }
+
 
 std::optional<std::vector<AllocatedMesh>> loaders::load_gltf_meshes(const char* filepath, RayTracer* rt) {
 	std::filesystem::path fp{ filepath };
@@ -304,6 +313,9 @@ void loaders::load_scene(const char* filepath, RayTracer* rt, Scene& scene) {
 		allocMesh.vertexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &bda);
 
 		meshes.push_back(allocMesh);
+
+
+		// Create BLAS structure too
 
 		std::cout << "ALLOACTED!" << mesh.name << '\n';
 	}

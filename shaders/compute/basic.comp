@@ -1,6 +1,6 @@
 #version 430
 
-#include "utils.include"
+#include "utils.glsl"
 
 layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
@@ -32,8 +32,11 @@ void main(){
     ndc.x =  float(id.x) / imageSize.x * 2 - 1;
     ndc.y =  float(imageSize.y -id.y) / imageSize.y * 2 - 1;
 
-    vec4 world = ubo.viewInv * ubo.projInv* vec4(ndc, 1.0, 1.0);
-    vec3 posOnPlane = world.xyz / world.w;
+    vec4 viewPos = ubo.projInv * vec4(ndc, 1.0, 1.0);
+    viewPos = viewPos/viewPos.w;
+
+    vec4 world = ubo.viewInv * viewPos;
+    vec3 posOnPlane = world.xyz;
 
     vec3 cameraPos = ubo.viewInv[3].xyz;
 

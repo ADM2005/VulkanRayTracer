@@ -241,3 +241,72 @@ public:
 		ImGui::DragFloat("Intensity", &intensity, 0.1f);
 	}
 };
+
+struct alignas(16) BVHNode {
+	glm::vec3 aabbMin;
+	uint32_t  leftFirst;   // internal: index of left child (right = left+1)
+	// leaf:     index of first triangle in the index list
+	glm::vec3 aabbMax;
+	uint32_t  triCount;    // 0 => internal node, >0 => leaf with triCount triangles
+};
+
+struct BVHTriRef {
+	uint32_t indexBufferOffset; // Index of first vertex in triangle triple (triIndex * 3) for the primitive
+	int32_t vertexOffset; // Offset into the vertex buffer (identical to that of the primitive)
+	uint32_t materialIndex; // Indexes the global material buffer directly.
+};
+
+struct BLASGPU {
+	VkDeviceAddress nodeBufferAddress; // BVHNode[] 
+	VkDeviceAddress triBufferAddress; // BVHTriRef[]
+	VkDeviceAddress vertexBufferAddress; // Same as vertex buffer for mesh
+	VkDeviceAddress indexBufferAddress; // Same as index buffer for mesh
+};
+
+struct TLASBuildInput {
+	glm::mat4x4 model;
+	glm::vec3 blasAABBMin;
+	glm::vec3 blasAABBMax;
+	uint32_t blasIndex;
+};
+
+struct alignas(16) TLASInstance {
+	glm::mat4 worldToObject;
+	glm::mat4 objectToWorld;
+	glm::vec3 worldAABBMin;
+	uint32_t blasIndex;
+	glm::vec3 worldAABBMax;
+	uint32_t padding;
+};
+
+struct RayTracePC {
+	VkDeviceAddress tlasInstanceAddress;	// TLASInstance[], indexed by leaf BVHNodes
+	VkDeviceAddress blasTable;				// BLASGPU[]
+	VkDeviceAddress materialAddress;		// global material buffer
+	uint32_t tlasInstanceCount;				// Number of tlas instances
+	uint32_t frameNumber;					// Use for randomisation
+	uint32_t sampleCount;					// Determines how to use result in accumulation
+	uint32_t maxBounces;					
+	uint32_t resetAccumulation;				// Not zero if accumulation buffer reset 
+											// When this is active, ignore history image and set directly
+};
+
+struct BVHBuildTriangle {
+	glm::vec3 v0, v1, v2;				// AABB and centroid checking
+	BVHTriRef ref;						// Actual data into the built BVH
+
+	glm::vec3 Centroid() const {
+
+		return (float)(1.0f/3.0f) * (v0 + v1 + v2);
+	}
+};
+
+struct BVHBuildResult {
+	std::vector<BVHNode> nodes;
+	std::vector<BVHTriRef> triangles;
+};
+
+struct TLASBuildResult {
+	std::vector<BVHNode> nodes;
+	std::vector<uint32_t> indices;
+};

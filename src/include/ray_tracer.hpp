@@ -31,6 +31,8 @@ public:
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)> func);
 
+	void uploadBLAS(BVHBuildResult& blas);
+
 private:
 
 	struct FrameData {
@@ -52,6 +54,7 @@ private:
 		AllocatedImage rtImage;
 		AllocatedImage historyImage;
 
+		AllocatedBuffer computeUBO;
 		VkDescriptorSet rtDescriptorSet;
 
 
@@ -59,6 +62,8 @@ private:
 		VkFence renderFinishedFence;
 		VkSemaphore imageAvailableSemaphore;
 	};
+
+	std::vector<std::pair<glm::vec3, glm::vec3>> blasObjectSpaceAABBs;
 
 	std::vector<FrameData> frameData{ FRAMES_IN_FLIGHT };
 	uint32_t _currentFrame{ 0 };
@@ -183,6 +188,7 @@ private:
 
 	void init_sync_structures();
 
+	void init_bvh();			// Create the per-mesh BLAS data, and allocate info for both BLAS and TLAS
 	void load_scene();
 
 	void load_meshes();
@@ -200,8 +206,11 @@ private:
 
 	void update_scene_buffers(FrameData& frame);
 
+	void update_compute_buffers(FrameData& frame);
+
 	void draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 
 	void present_swapchain_image(uint32_t idx);
+
 };

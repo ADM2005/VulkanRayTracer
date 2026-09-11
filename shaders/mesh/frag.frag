@@ -88,7 +88,7 @@ vec3 blinnPhong(Material mat, DirectionalLight light, vec3 normal, vec3 viewDir)
 
     float specularFactor = max(0, dot(n, h));
     float specPower = pow(specularFactor, shininess);
-    float norm = (shininess + 2.0) / 8.0;
+    float norm = (shininess + 8.0) / (8.0 * 3.14159);
 
     vec3 specularReflection = specularColor * specPower * norm * diffuseFactor * incomingLight;
 
