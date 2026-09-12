@@ -31,7 +31,7 @@ public:
 
 	void immediate_submit(std::function<void(VkCommandBuffer cmd)> func);
 
-	void uploadBLAS(BVHBuildResult& blas);
+	void uploadBLAS(const BVHBuildResult& blas);
 
 private:
 
@@ -57,6 +57,8 @@ private:
 		AllocatedBuffer computeUBO;
 		VkDescriptorSet rtDescriptorSet;
 
+		// Ray Tracer
+		AllocatedBuffer tlasTable{};
 
 		// Both
 		VkFence renderFinishedFence;
@@ -64,6 +66,10 @@ private:
 	};
 
 	std::vector<std::pair<glm::vec3, glm::vec3>> blasObjectSpaceAABBs;
+
+	std::vector<BLASGPU> blasData;
+
+	AllocatedBuffer blasTable;		// Written once, global across all frames
 
 	std::vector<FrameData> frameData{ FRAMES_IN_FLIGHT };
 	uint32_t _currentFrame{ 0 };
@@ -179,7 +185,6 @@ private:
 	void create_descriptor_layouts();
 	void create_gfx_descriptors();
 	void create_rt_descriptors();
-	void create_rt_image_descriptors();
 
 	void create_uniform_buffers();
 	void create_compute_buffers();
@@ -188,7 +193,8 @@ private:
 
 	void init_sync_structures();
 
-	void init_bvh();			// Create the per-mesh BLAS data, and allocate info for both BLAS and TLAS
+	void init_bvh();			// Create the BLAS table with the existing uploaded BLAS data, as well as 
+								// the TLAS structure from the object instances.
 	void load_scene();
 
 	void load_meshes();
@@ -205,12 +211,10 @@ private:
 	void draw_gfx(VkCommandBuffer cmd, FrameData& frame, VkImageLayout imgLayout, VkImageLayout resultLayout);
 
 	void update_scene_buffers(FrameData& frame);
-
 	void update_compute_buffers(FrameData& frame);
+	void update_tlas_table(FrameData& frame);
 
 	void draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkImageLayout resultLayout);
-
-
 	void present_swapchain_image(uint32_t idx);
 
 };

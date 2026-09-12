@@ -148,7 +148,7 @@ AllocatedMesh allocateMesh(const fastgltf::Mesh& mesh, fastgltf::Asset& asset, R
 
 	VkBufferCreateInfo idxInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
 	idxInfo.size = indexSize;
-	idxInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+	idxInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
 	VmaAllocationCreateInfo allocCreateInfo{}; // Same for both
 	allocCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
 	allocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -238,10 +238,18 @@ std::optional<std::vector<AllocatedMesh>> loaders::load_gltf_meshes(const char* 
 		AllocatedMesh allocMesh = allocateMesh(mesh, asset, rt);
 		std::cout << "ALLOACTED!" << mesh.name << '\n';
 
-		VkBufferDeviceAddressInfo bda { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
-		bda.buffer = allocMesh.vertexBuffer.buffer;
+		VkBufferDeviceAddressInfo vertBda { VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		vertBda.buffer = allocMesh.vertexBuffer.buffer;
 
-		allocMesh.vertexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &bda);
+		allocMesh.vertexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &vertBda);
+
+
+		VkBufferDeviceAddressInfo idxBda{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		idxBda.buffer = allocMesh.indexBuffer.buffer;
+
+		allocMesh.indexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &idxBda);
+
+
 		allocatedMeshes.push_back(allocateMesh(mesh, asset, rt));
 
 	}
@@ -307,10 +315,16 @@ void loaders::load_scene(const char* filepath, RayTracer* rt, Scene& scene) {
 				allocMesh.primitives[i].materialIndex = 0;
 			}
 		}
-		VkBufferDeviceAddressInfo bda{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
-		bda.buffer = allocMesh.vertexBuffer.buffer;
+		VkBufferDeviceAddressInfo vertBda{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		vertBda.buffer = allocMesh.vertexBuffer.buffer;
 
-		allocMesh.vertexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &bda);
+		allocMesh.vertexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &vertBda);
+		
+
+		VkBufferDeviceAddressInfo idxBda{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		idxBda.buffer = allocMesh.indexBuffer.buffer;
+
+		allocMesh.indexBuffer.bufferAddress = vkGetBufferDeviceAddress(rt->_device, &idxBda);
 
 		meshes.push_back(allocMesh);
 
@@ -372,6 +386,7 @@ void loaders::load_scene(const char* filepath, RayTracer* rt, Scene& scene) {
 			obj.scale = scale;
 			obj.mesh = meshes[node.meshIndex.value()];
 			obj.name = node.name;
+			obj.meshIndex = node.meshIndex.value();
 			meshObjects.push_back(obj);
 		}
 		if (node.lightIndex.has_value()) {

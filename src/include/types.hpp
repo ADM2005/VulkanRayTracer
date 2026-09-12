@@ -186,6 +186,7 @@ public:
 
 class MeshObject : public SceneObject {
 public:
+	size_t meshIndex;
 	std::optional<AllocatedMesh> mesh;
 };
 
@@ -244,23 +245,23 @@ public:
 
 struct alignas(16) BVHNode {
 	glm::vec3 aabbMin;
-	uint32_t  leftFirst;   // internal: index of left child (right = left+1)
-	// leaf:     index of first triangle in the index list
+	uint32_t  leftFirst;						// internal: index of left child (right = left+1)
+												// leaf:     index of first triangle in the index list
 	glm::vec3 aabbMax;
-	uint32_t  triCount;    // 0 => internal node, >0 => leaf with triCount triangles
+	uint32_t  triCount;							// 0 => internal node, >0 => leaf with triCount triangles
 };
 
 struct BVHTriRef {
-	uint32_t indexBufferOffset; // Index of first vertex in triangle triple (triIndex * 3) for the primitive
-	int32_t vertexOffset; // Offset into the vertex buffer (identical to that of the primitive)
-	uint32_t materialIndex; // Indexes the global material buffer directly.
+	uint32_t indexBufferOffset;				// Index of first vertex in triangle triple (triIndex * 3) for the primitive
+	int32_t vertexOffset;					// Offset into the vertex buffer (identical to that of the primitive)
+	uint32_t materialIndex;					// Indexes the global material buffer directly.
 };
 
 struct BLASGPU {
-	VkDeviceAddress nodeBufferAddress; // BVHNode[] 
-	VkDeviceAddress triBufferAddress; // BVHTriRef[]
-	VkDeviceAddress vertexBufferAddress; // Same as vertex buffer for mesh
-	VkDeviceAddress indexBufferAddress; // Same as index buffer for mesh
+	VkDeviceAddress nodeBufferAddress;		// BVHNode[] 
+	VkDeviceAddress triBufferAddress;		// BVHTriRef[]
+	VkDeviceAddress vertexBufferAddress;	// Same as vertex buffer for mesh
+	VkDeviceAddress indexBufferAddress;		// Same as index buffer for mesh
 };
 
 struct TLASBuildInput {
@@ -280,7 +281,7 @@ struct alignas(16) TLASInstance {
 };
 
 struct RayTracePC {
-	VkDeviceAddress tlasInstanceAddress;	// TLASInstance[], indexed by leaf BVHNodes
+	VkDeviceAddress tlasInstanceAddress;	// TLASInstance[]
 	VkDeviceAddress blasTable;				// BLASGPU[]
 	VkDeviceAddress materialAddress;		// global material buffer
 	uint32_t tlasInstanceCount;				// Number of tlas instances

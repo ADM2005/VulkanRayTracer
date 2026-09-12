@@ -1,8 +1,20 @@
+#ifndef RAY_UTILS_GLSL
+#define RAY_UTILS_GLSL
+
+#include "rt_types.glsl"
+
 struct Ray{
     vec3 origin;
     vec3 direction;
 };
 
+struct RayBoxHit{
+    float dist;
+    vec3 enterPos;
+    vec3 exitPos;
+};
+
+// Mueller-Trumbore ray-triangle intersection
 bool intersectTriangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, out float t, out float u, out float v) {
     const float EPSILON = 0.0000001;
     
@@ -45,3 +57,25 @@ bool intersectTriangle(Ray ray, vec3 v0, vec3 v1, vec3 v2, out float t, out floa
     // If t is positive, the ray hit the triangle in the forward direction
     return t > EPSILON;
 }
+
+bool intersectBox(Ray ray, vec3 bMin, vec3 bMax, out RayBoxHit boxHit){
+    vec3 invD = 1.0/(ray.direction);
+    vec3 t0 = (bMin - ray.origin) * invD;
+    vec3 t1 = (bMax - ray.origin) * invD;
+
+    vec3 tNear = min(t0, t1);
+    vec3 tFar = max(t0, t1);
+
+    float near = max(max(tNear.x, tNear.y), tNear.z);
+    float far = min(min(tFar.x, tFar.y), tFar.z);
+
+    if (near > far || far < 0.0) return false;
+    
+
+    boxHit.dist = near > 0.0 ? near : far;
+    boxHit.enterPos = ray.origin + near * ray.direction;
+    boxHit.exitPos = ray.origin + far * ray.direction;
+
+    return true;
+}
+#endif

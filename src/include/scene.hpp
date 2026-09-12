@@ -25,5 +25,4 @@ public:
 		defaultCamera.near = 0.01f;
 		defaultCamera.far = 1000.0f;
 	}
-
 };

@@ -3,6 +3,8 @@
 #define GLM_ENABLE_EXPERIMENTAL
 
 #include "include/ray_tracer.hpp"
+#include "include/bvh.hpp"
+
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -460,7 +462,7 @@ void RayTracer::init_rt_pipeline() {
 	VkPushConstantRange pcRange{};
 	pcRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 	pcRange.offset = 0;
-	pcRange.size = sizeof(ComputePC);
+	pcRange.size = sizeof(RayTracePC);
 
 	VkDescriptorSetLayout layouts[]{ _rtDescriptorLayout };
 
@@ -892,11 +894,11 @@ void RayTracer::draw() {
 
 	clear_screen(cmd, drawImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 	
-	utils::transition_image_layout(cmd, depthImage.image, depthImage.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
+	//utils::transition_image_layout(cmd, depthImage.image, depthImage.format, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, VK_IMAGE_ASPECT_DEPTH_BIT);
 
-	//draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	draw_compute(cmd, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
-	draw_gfx(cmd, frame, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+	//draw_gfx(cmd, frame, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	draw_imgui(cmd, drawImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 
@@ -1088,7 +1090,36 @@ void RayTracer::draw_gfx(VkCommandBuffer cmd, FrameData& frame, VkImageLayout im
 		VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
 }
 
+void RayTracer::update_tlas_table(FrameData& frame) {
+	AllocatedBuffer& table = frame.tlasTable;
+
+	std::vector<TLASBuildInput> input;
+	input.reserve(scene.objects.size());
+
+	for (const auto& obj : scene.objects) {
+		TLASBuildInput buildInput{};
+		auto idx = obj.meshIndex;
+		buildInput.blasIndex = (uint32_t)idx;
+		buildInput.blasAABBMin = blasObjectSpaceAABBs[idx].first;
+		buildInput.blasAABBMax = blasObjectSpaceAABBs[idx].second;
+		buildInput.model = obj.getTransform();
+
+		input.push_back(buildInput);
+	}
+
+	std::vector<TLASInstance> instances = bvh::createTLASInstances(input);
+
+	size_t copySize = instances.size() * sizeof(TLASInstance);
+
+	void* mappedData = table.allocInfo.pMappedData;
+	if (!mappedData) throw std::runtime_error("TLAS table has no mapped data!");
+
+	memcpy(mappedData, instances.data(), copySize);
+}
+
 void RayTracer::update_compute_buffers(FrameData& frame) {
+	update_tlas_table(frame);
+
 	ComputeUBO ubo{};
 	float aspect = (float)_swapchainExtent.width / _swapchainExtent.height;
 	auto [view, projection] = scene.camera.getViewMatrices(aspect);
@@ -1111,8 +1142,15 @@ void RayTracer::draw_compute(VkCommandBuffer cmd, VkImageLayout imgLayout, VkIma
 
 	AllocatedImage drawGFXImage = frame.drawImage;
 
-	ComputePC pc{};
-	pc.frameNumber = glm::int16((short)_currentFrame);
+	RayTracePC pc{};
+	pc.tlasInstanceAddress = frame.tlasTable.bufferAddress.value();
+	pc.blasTable = blasTable.bufferAddress.value();
+	pc.materialAddress = frame.materialBuffer.bufferAddress.value();
+	pc.tlasInstanceCount = scene.objects.size();
+	pc.frameNumber = _currentFrame;
+	pc.sampleCount = 0;
+	pc.maxBounces = 4;
+	pc.resetAccumulation = 0;
 
 	VkDescriptorSet sets[]{ frame.rtDescriptorSet };
 	
@@ -1390,11 +1428,110 @@ void RayTracer::init_vma() {
 }
 
 void RayTracer::init_bvh() {
+	for (size_t i = 0; i < scene.meshes.size(); i++) {
+		const auto& mesh = scene.meshes[i];
+		auto& blas = blasData[i];
+
+		blas.indexBufferAddress = mesh.indexBuffer.bufferAddress.value();
+		blas.vertexBufferAddress = mesh.vertexBuffer.bufferAddress.value();
+	}
+
+	VkDeviceSize blasTableSize = sizeof(BLASGPU) * scene.meshes.size();
+
+	// Create allocation for BLAS table
+	VmaAllocationCreateInfo blasTableAlloc{};
+	blasTableAlloc.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	blasTableAlloc.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	VkBufferCreateInfo blasTableInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	blasTableInfo.size = blasTableSize;
+	blasTableInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		| VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+	if (vmaCreateBuffer(allocator, &blasTableInfo, &blasTableAlloc,
+		&blasTable.buffer, &blasTable.alloc, &blasTable.allocInfo) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create blas table buffer");
+	}
+
+	VkBufferDeviceAddressInfo blasBDA{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+	blasBDA.buffer = blasTable.buffer;
+
+	blasTable.bufferAddress = vkGetBufferDeviceAddress(_device, &blasBDA);
+
+	VkDeviceSize tlasTableSize = scene.objects.size() * sizeof(TLASInstance);
+	VmaAllocationCreateInfo tlasTableAlloc{};
+	tlasTableAlloc.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	tlasTableAlloc.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+	tlasTableAlloc.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+	VkBufferCreateInfo tlasTableInfo { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	tlasTableInfo.size = tlasTableSize;
+	tlasTableInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		| VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+	for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+		AllocatedBuffer& tlasTable = frameData[i].tlasTable;
+		if (vmaCreateBuffer(allocator, &tlasTableInfo, &tlasTableAlloc,
+			&tlasTable.buffer, &tlasTable.alloc, &tlasTable.allocInfo) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create talas table buffer");
+		}
+
+		VkBufferDeviceAddressInfo tlasBDA{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+		tlasBDA.buffer = tlasTable.buffer;
+
+		tlasTable.bufferAddress = vkGetBufferDeviceAddress(_device, &tlasBDA);
+
+	}
+
+
+
+	// Staging Buffer (just for the BLAS since TLAS is practically per-frame/written as needed)
+	AllocatedBuffer stagingBuffer{};
+
+	VkBufferCreateInfo stagingInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	stagingInfo.size = blasTableSize;
+	stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+	VmaAllocationCreateInfo stagingAllocCreateInfo{};
+	stagingAllocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	stagingAllocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+	if (vmaCreateBuffer(allocator, &stagingInfo, &stagingAllocCreateInfo,
+		&stagingBuffer.buffer, &stagingBuffer.alloc, &stagingBuffer.allocInfo) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create staging buffer");
+	}
+
+	void* stagingMappedData = stagingBuffer.allocInfo.pMappedData;
+	if (!stagingMappedData) throw std::runtime_error("Staging mapped data is not assigned!");
+
+	memcpy(stagingMappedData, blasData.data(), blasTableSize);
+
+	immediate_submit([&](VkCommandBuffer cmd) {
+		VkBufferCopy copy;
+		copy.srcOffset = 0;
+		copy.dstOffset = 0;
+		copy.size = blasTableSize;
+
+		vkCmdCopyBuffer(cmd, stagingBuffer.buffer, blasTable.buffer, 1, &copy);
+	});
+
+	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.alloc);
+
+	deletionQueue.push([&]() {
+		vmaDestroyBuffer(allocator, blasTable.buffer, blasTable.alloc);
+		for (auto i = 0; i < FRAMES_IN_FLIGHT; i++) {
+			AllocatedBuffer& tlasTable = frameData[i].tlasTable;
+			vmaDestroyBuffer(allocator, tlasTable.buffer, tlasTable.alloc);
+		}
+
+	});
 }
 
 void RayTracer::load_scene() {
 	loaders::load_scene("C:/Users/adamm/GitRepos/VulkanRayTracer/assets/Interior/Interior.gltf", this, scene);
 	
+	init_bvh();
+
 	for (size_t i = 0; i < scene.objects.size(); ++i) {
 		const auto& obj = scene.objects[i];
 		const auto& mesh = obj.mesh.value();
@@ -1603,7 +1740,106 @@ void RayTracer::init_depth_images() {
 		});
 }
 
-void RayTracer::uploadBLAS(BVHBuildResult& blas) {
-	std::vector<BVHTriRef> triangles = blas.triangles;
-	std::vector<BVHNode> nodes = blas.nodes;
+void RayTracer::uploadBLAS(const BVHBuildResult& blas) {
+	const std::vector<BVHTriRef>& triangles = blas.triangles;
+	const std::vector<BVHNode>& nodes = blas.nodes;
+
+	AllocatedBuffer bvhNodes{};
+	VkDeviceSize nodesSize = nodes.size() * sizeof(BVHNode);
+
+	AllocatedBuffer triRefs{};
+	VkDeviceSize triSize = triangles.size() * sizeof(BVHTriRef);
+
+	
+
+	VmaAllocationCreateInfo nodeAllocCreateInfo{};
+	nodeAllocCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	nodeAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+	VkBufferCreateInfo nodeInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	nodeInfo.size = nodesSize;
+	nodeInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		| VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+
+
+	VmaAllocationCreateInfo triangleAllocCreateInfo{};
+	triangleAllocCreateInfo.usage = VMA_MEMORY_USAGE_GPU_ONLY;
+	triangleAllocCreateInfo.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+
+	VkBufferCreateInfo triangleInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	triangleInfo.size = triSize;
+	triangleInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+		| VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+	
+	if (vmaCreateBuffer(allocator, &nodeInfo, &nodeAllocCreateInfo, &bvhNodes.buffer, &bvhNodes.alloc, &bvhNodes.allocInfo)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create BLAS buffer");
+	}
+
+	VkBufferDeviceAddressInfo nodeAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+	nodeAddrInfo.buffer = bvhNodes.buffer;
+
+
+	if (vmaCreateBuffer(allocator, &triangleInfo, &triangleAllocCreateInfo, &triRefs.buffer, &triRefs.alloc, &triRefs.allocInfo)
+		!= VK_SUCCESS) {
+		throw std::runtime_error("failed to create BLAS buffer");
+	}
+
+
+	VkBufferDeviceAddressInfo triangleAddrInfo{ VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO };
+	triangleAddrInfo.buffer = triRefs.buffer;
+
+
+	AllocatedBuffer stagingBuffer{};
+
+	VkBufferCreateInfo stagingInfo{ VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
+	stagingInfo.size = nodesSize + triSize;
+	stagingInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+	
+	VmaAllocationCreateInfo stagingAllocCreateInfo{};
+	stagingAllocCreateInfo.usage = VMA_MEMORY_USAGE_CPU_TO_GPU;
+	stagingAllocCreateInfo.flags = VMA_ALLOCATION_CREATE_MAPPED_BIT;
+
+	if (vmaCreateBuffer(allocator, &stagingInfo, &stagingAllocCreateInfo, &stagingBuffer.buffer, &stagingBuffer.alloc,
+		&stagingBuffer.allocInfo) != VK_SUCCESS) {
+		throw std::runtime_error("failed to create staging buffer!");
+	}
+
+
+	void* stagingMappedData = stagingBuffer.allocInfo.pMappedData;
+	if (!stagingMappedData) throw std::runtime_error("staging buffer not mapped!");
+
+	memcpy(stagingMappedData, nodes.data(), nodesSize);
+	memcpy((char*)stagingMappedData + nodesSize, triangles.data(), triSize);
+
+	immediate_submit([&](VkCommandBuffer cmd) {
+		VkBufferCopy nodeCopy;
+		nodeCopy.srcOffset = 0;
+		nodeCopy.dstOffset = 0;
+		nodeCopy.size = nodesSize;
+		vkCmdCopyBuffer(cmd, stagingBuffer.buffer, bvhNodes.buffer, 1, &nodeCopy);
+		
+		VkBufferCopy triCopy;
+		triCopy.srcOffset = nodesSize;
+		triCopy.dstOffset = 0;
+		triCopy.size = triSize;
+
+		vkCmdCopyBuffer(cmd, stagingBuffer.buffer, triRefs.buffer, 1, &triCopy);
+	});
+
+	vmaDestroyBuffer(allocator, stagingBuffer.buffer, stagingBuffer.alloc);
+
+	BLASGPU data{};
+	data.nodeBufferAddress = vkGetBufferDeviceAddress(_device, &nodeAddrInfo);
+	data.triBufferAddress = vkGetBufferDeviceAddress(_device, &triangleAddrInfo);
+
+	blasData.push_back(data);		// vertAddr and indexAddr will be populated in init_bvh
+	blasObjectSpaceAABBs.push_back({ nodes[0].aabbMin, nodes[0].aabbMax });
+
+	deletionQueue.push([=]() {
+		vmaDestroyBuffer(allocator, bvhNodes.buffer, bvhNodes.alloc);
+		vmaDestroyBuffer(allocator, triRefs.buffer, triRefs.alloc);
+		});
+
 }

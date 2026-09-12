@@ -284,4 +284,45 @@ BVHBuildResult bvh::buildBLAS(const std::vector<Vertex>& vertexBuffer, const std
 	return result;
 }
 
+std::vector<TLASInstance> bvh::createTLASInstances(const std::vector<TLASBuildInput>& tlasData) {
+	std::vector<TLASInstance> instances;
+	instances.reserve(tlasData.size());
 
+	for (const auto& input : tlasData) {
+		glm::mat4 model = input.model;
+		glm::mat4 modelInv = glm::inverse(model);
+
+		glm::vec3 objMin = input.blasAABBMin;
+		glm::vec3 objMax = input.blasAABBMax;
+
+
+		glm::vec3 worldMin{FLT_MAX};
+		glm::vec3 worldMax{FLT_MIN};
+
+		for (int x = 0; x < 2; x++) {
+			for (int y = 0; y < 2; y++) {
+				for (int z = 0; z < 2; z++) {
+					glm::vec3 corner{};
+					corner.x = (x == 0) ? objMin.x : objMax.x;
+					corner.y = (y == 0) ? objMin.y : objMax.y;
+					corner.z = (z == 0) ? objMin.z : objMax.z;
+
+					glm::vec3 transformed = model * glm::vec4(corner, 1.0);
+
+					worldMin = glm::min(worldMin, transformed);
+					worldMax = glm::max(worldMin, transformed);
+				}
+			}
+		}
+
+		TLASInstance instance{};
+		instance.worldToObject = modelInv;
+		instance.objectToWorld = model;
+		instance.worldAABBMin = worldMin;
+		instance.blasIndex = input.blasIndex;
+		instance.worldAABBMax = worldMax;
+		
+		instances.push_back(instance);
+	}
+	return instances;
+}

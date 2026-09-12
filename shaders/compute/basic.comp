@@ -1,51 +1,53 @@
 #version 430
 
-#include "utils.glsl"
+#include "rt_types.glsl"
+#include "ray_utils.glsl"
 
 layout (local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
 layout(set = 0, binding = 0, rgba16) uniform image2D images[2];
 
-const float fov = 70.f;
-
 layout(set = 0, binding = 1) uniform UBO{
     mat4 projInv;
     mat4 viewInv;
     ivec2 imageSize;
-} ubo;
+};
 
-layout(std430, push_constant) uniform Pc{
-    int frameNumber;
-}pc ;
+Ray getCameraRay(){
+    Ray ray;
 
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
 
+    // NDC [-1,1]
+    vec2 ndc;                                               
+    ndc.x =  float(id.x) / imageSize.x * 2 - 1;
+    ndc.y =  float(imageSize.y -id.y) / imageSize.y * 2 - 1;
+
+    // Undo projection matrix to get position of view fragment
+    vec4 viewPos = projInv * vec4(ndc, 1.0, 1.0);
+    viewPos = viewPos/viewPos.w;
+
+    // Undo view matrix to get position position on near plane
+    vec4 world = viewInv * viewPos;
+    vec3 posOnPlane = world.xyz;            
+
+    ray.origin = viewInv[3].xyz;        // Camera position, translation column of inverse
+    ray.direction = normalize(posOnPlane - ray.origin);
+
+    return ray;
+}
 
 void main(){
 
     const vec3 tri[3] = vec3[](vec3(0,1, -20), vec3(-1,-1, 0), vec3(1, -1, 0) ); 
 
-    ivec2 imageSize = ubo.imageSize;
+    ivec2 imageSize = imageSize;
     ivec2 id = ivec2(gl_GlobalInvocationID.xy);
 
-    vec2 ndc;
+   
+    Ray ray = getCameraRay();
 
-    ndc.x =  float(id.x) / imageSize.x * 2 - 1;
-    ndc.y =  float(imageSize.y -id.y) / imageSize.y * 2 - 1;
-
-    vec4 viewPos = ubo.projInv * vec4(ndc, 1.0, 1.0);
-    viewPos = viewPos/viewPos.w;
-
-    vec4 world = ubo.viewInv * viewPos;
-    vec3 posOnPlane = world.xyz;
-
-    vec3 cameraPos = ubo.viewInv[3].xyz;
-
-    vec3 rayDir = normalize(posOnPlane - cameraPos);
-    Ray ray;
-    ray.origin = cameraPos;
-    ray.direction = rayDir;
     float t, u, v;
-
     if(intersectTriangle(ray, tri[0], tri[1], tri[2], t, u, v)){
         vec4 color = vec4(sin(t * 10.0));
         imageStore(images[0], id, color);
